@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    container_name: api
+    restart: always
+    ports:
+      - "10000:8000"
+    volumes:
+      - ./:/app
+      - models_data:/models
+    env_file:
+      - .env
+    environment:
+      - LLM_MODEL_PATH=/models/llama-2-7b-chat.Q4_K_M.gguf
+      - MODEL_NAME=llama-2-7b-chat-gguf
+    depends_on:
+      - db
+    networks:
+      - app-network
+
+  db:
+    image: postgres:15
+    container_name: cv-analyzer-db
+    restart: always
+    ports:
+      - "11000:5432"
+    environment:
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=postgres
+      - APP_DB_USER=${DB_USER}
+      - APP_DB_PASS=${DB_PASSWORD}
+      - APP_DB_NAME=${DB_NAME}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/db/init-scripts:/docker-entrypoint-initdb.d
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  models_data:
