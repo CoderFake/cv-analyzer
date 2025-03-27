@@ -21,3 +21,16 @@ pillow==10.2.0
 duckduckgo-search==3.9.9
 beautifulsoup4==4.12.2
 boto3==1.34.41
+
+# Requirements for LLM Web Search
+faiss-cpu==1.10.0
+rank_bm25==0.2.2
+sentence-transformers==2.2.2
+transformers>=4.30.0
+optimum>=1.16.0
+duckduckgo-search>=3.9.9
+beautifulsoup4>=4.12.2
+aiohttp>=3.8.5
+lxml>=4.9.3
+Brotli>=1.0.9
+
