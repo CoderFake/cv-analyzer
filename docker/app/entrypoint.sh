@@ -4,7 +4,7 @@ set -e
 LLM_MODEL_PATH=${LLM_MODEL_PATH:-"/models/llama-2-7b-chat.Q4_K_M.gguf"}
 MODEL_NAME=${MODEL_NAME:-"llama-2-7b-chat-gguf"}
 
-DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://postgres:password@db:5432/cv_analyzer}
+DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@db:5432/cv_analyzer}
 
 echo "Kiểm tra kết nối database..."
 python -c "
