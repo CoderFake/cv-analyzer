@@ -9,8 +9,16 @@ RUN apt-get update && apt-get install -y \
     curl \
     poppler-utils \
     tesseract-ocr \
+    tesseract-ocr-vie \
     libreoffice \
     git \
+    libgl1-mesa-glx \
+    ffmpeg \
+    libsm6 \
+    libxext6 \
+    libmagic1 \
+    wget \
+    unzip \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -18,12 +26,18 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt huggingface_hub tqdm
 
+# Cài đặt extra models cho NLTK
+RUN python -m nltk.downloader punkt
+
 # Tạo thư mục cho mô hình LLM
 ARG LLM_MODEL_PATH="/models"
 RUN mkdir -p ${LLM_MODEL_PATH}
 
 # Copy source code của ứng dụng
 COPY . .
+
+# Tạo các thư mục cần thiết
+RUN mkdir -p /tmp/uploads /tmp/knowledge
 
 # Làm cho entrypoint script có thể thực thi
 RUN chmod +x /app/docker/app/entrypoint.sh
