@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     SEARXNG_URL: str = ""
     SEARXNG_LANGUAGE: str = "vi"
 
+    APP_NAME: Optional[str] = None
+    APP_DESCRIPTION: Optional[str] = None
+    APP_VERSION: Optional[str] = None
+    MODEL_NAME: Optional[str] = None
+
     model_config = SettingsConfigDict(
         env_file=f".env.{os.getenv('ENVIRONMENT', 'dev')}",
         env_file_encoding="utf-8",
