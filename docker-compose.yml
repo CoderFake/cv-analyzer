@@ -6,7 +6,7 @@ services:
     container_name: api
     restart: always
     ports:
-      - "10000:8000"
+      - "${API_PORT}:8000"
     volumes:
       - ./:/app
       - models_data:/models
@@ -25,7 +25,7 @@ services:
     container_name: cv-analyzer-db
     restart: always
     ports:
-      - "11000:5432"
+      - "${DB_PORT}:5432"
     environment:
       - POSTGRES_USER=${DB_USER}
       - POSTGRES_PASSWORD=${DB_PASSWORD}
