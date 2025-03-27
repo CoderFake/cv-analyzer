@@ -24,4 +24,4 @@ class ChatMessage(BaseModel):
     chat = relationship("Chat", backref="messages")
     role = Column(String, nullable=False)
     content = Column(Text, nullable=False)
-    metadata = Column(JSON, nullable=True)
+    message_metadata = Column(JSON, nullable=True)

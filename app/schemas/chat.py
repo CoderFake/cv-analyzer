@@ -9,13 +9,13 @@ from app.schemas.common import BaseSchema
 class ChatMessageBase(BaseSchema):
     role: str  # "user", "assistant", "system"
     content: str
-    metadata: Optional[Dict[str, Any]] = None
+    message_metadata: Optional[Dict[str, Any]] = None
 
 
 class ChatMessageCreate(BaseModel):
     role: str
     content: str
-    metadata: Optional[Dict[str, Any]] = None
+    message_metadata: Optional[Dict[str, Any]] = None
 
     model_config = ConfigDict(
         from_attributes=True
