@@ -1,4 +1,5 @@
 import os
+from dataclasses import field
 from typing import List, Optional, Union
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -42,6 +43,11 @@ class Settings(BaseSettings):
     REDOC_URL: Optional[str] = "/redoc"
     OPENAPI_URL: Optional[str] = "/openapi.json"
     CORS_ORIGINS: Union[str, List[str]] = field(default_factory=lambda: ["*"])
+
+    #search
+    SEARCH_BACKEND: str = "duckduckgo"
+    SEARXNG_URL: str = ""  
+    SEARXNG_LANGUAGE: str = "vi"
 
     model_config = SettingsConfigDict(
         env_file=f".env.{os.getenv('ENVIRONMENT', 'dev')}",

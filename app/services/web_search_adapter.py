@@ -1,9 +1,5 @@
-import os
-import sys
-import importlib.util
 import logging
-from typing import List, Dict, Any, Optional
-import re
+from app.core.config import settings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -13,7 +9,7 @@ logger = logging.getLogger("web-search-adapter")
 
 
 try:
-    from app.lib.llm_web_search.llm_web_search import retrieve_from_duckduckgo, Generator
+    from app.lib.llm_web_search.llm_web_search import retrieve_from_duckduckgo, Generator, retrieve_from_searxng
     from app.lib.llm_web_search.retrieval import DocumentRetriever
 
     document_retriever = DocumentRetriever(
@@ -34,20 +30,29 @@ except ImportError as e:
 
 
 async def search_with_llm_web_search(query: str, max_results: int = 5):
-
     if not USING_LLM_WEB_SEARCH:
         logger.error("LLM_Web_search không được cài đặt hoặc không thể sử dụng.")
         return []
 
     try:
-
-        gen = Generator(retrieve_from_duckduckgo(
-            query,
-            document_retriever,
-            max_results=max_results,
-            instant_answers=True,
-            simple_search=False
-        ))
+        if settings.SEARCH_BACKEND == "searxng" and settings.SEARXNG_URL:
+            gen = Generator(retrieve_from_searxng(
+                query,
+                settings.SEARXNG_URL,
+                document_retriever,
+                max_results=max_results,
+                instant_answers=True,
+                simple_search=False
+            ))
+        else:
+            # Mặc định sử dụng DuckDuckGo với region Việt Nam
+            gen = Generator(retrieve_from_duckduckgo(
+                query,
+                document_retriever,
+                max_results=max_results,
+                instant_answers=True,
+                simple_search=False
+            ))
 
         messages = []
 
