@@ -39,13 +39,13 @@ class ChatRepository(BaseRepository[Chat, ChatCreate, ChatUpdate]):
             chat_id: UUID,
             role: str,
             content: str,
-            metadata: Optional[Dict[str, Any]] = None
+            message_metadata: Optional[Dict[str, Any]] = None
     ) -> ChatMessage:
         message = ChatMessage(
             chat_id=chat_id,
             role=role,
             content=content,
-            metadata=metadata
+            message_metadata=message_metadata
         )
         self.db.add(message)
         await self.db.commit()
