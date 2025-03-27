@@ -36,6 +36,8 @@ class LLMKnowledgeService:
             category: Optional[str] = None,
             use_knowledge: bool = True
     ) -> Dict[str, Any]:
+        language = llm_service.detect_language(question)
+
         if not use_knowledge:
             response = await llm_service.generate_response(
                 prompt=question,
@@ -66,22 +68,36 @@ class LLMKnowledgeService:
         context = ""
         sources = []
         for i, doc in enumerate(knowledge_docs, 1):
-            context += f"\n[Document {i}] {doc.title}\n{doc.content}\n"
+            if language == "en":
+                context += f"\n[Document {i}] {doc.title}\n{doc.content}\n"
+            else:
+                context += f"\n[Tài liệu {i}] {doc.title}\n{doc.content}\n"
             sources.append({
                 "id": str(doc.id),
                 "title": doc.title,
                 "category": doc.category
             })
 
-        prompt = f"""Hãy trả lời câu hỏi dựa trên thông tin trong các tài liệu sau. 
-        Nếu thông tin trong tài liệu không đủ để trả lời, hãy cho biết bạn không có đủ thông tin và trả lời dựa trên kiến thức của bạn.
+        if language == "en":
+            prompt = f"""Please answer the question based on the information in the following documents. 
+            If the information in the documents is not sufficient to answer, please indicate that you don't have enough information and answer based on your knowledge.
 
-        Tài liệu:
-        {context}
-        
-        Câu hỏi: {question}
-        
-        Trả lời:"""
+            Documents:
+            {context}
+
+            Question: {question}
+
+            Answer:"""
+        else:
+            prompt = f"""Hãy trả lời câu hỏi dựa trên thông tin trong các tài liệu sau. 
+            Nếu thông tin trong tài liệu không đủ để trả lời, hãy cho biết bạn không có đủ thông tin và trả lời dựa trên kiến thức của bạn.
+
+            Tài liệu:
+            {context}
+
+            Câu hỏi: {question}
+
+            Trả lời:"""
 
         response = await llm_service.generate_response(
             prompt=prompt,

@@ -7,6 +7,7 @@ from llama_cpp import Llama
 
 from app.core.config import settings
 from app.services.web_search_service import web_search_service
+from langdetect import detect, LangDetectException
 
 
 class LLMService:
@@ -79,6 +80,13 @@ class LLMService:
         
         Trả lời:"""
 
+    def detect_language(self, text: str) -> str:
+        try:
+            lang = detect(text)
+            return "en" if lang == "en" else "vi"
+        except LangDetectException:
+            return "vi"
+
     async def generate_response(
             self,
             prompt: str,
@@ -86,8 +94,14 @@ class LLMService:
             max_tokens: int = 2048,
             temperature: float = 0.7
     ) -> str:
+
+        language = self.detect_language(prompt)
+
         if system_prompt is None:
-            system_prompt = self.system_prompt
+            if language == "en":
+                system_prompt = """You are an AI assistant specializing in resume analysis and evaluation. You analyze candidates' CVs to provide objective and helpful assessments. You always analyze information thoroughly before giving feedback. When necessary, you search the web for information to provide more accurate evaluations. Please respond in English."""
+            else:
+                system_prompt = self.system_prompt
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -143,6 +157,9 @@ class LLMService:
             chat_history: List[Dict[str, str]] = None,
             cv_content: Optional[str] = None
     ) -> str:
+
+        language = self.detect_language(question)
+
         chat_history_text = ""
         if chat_history:
             for message in chat_history:
@@ -150,11 +167,31 @@ class LLMService:
                 content = message.get("content", "")
                 chat_history_text += f"{role.capitalize()}: {content}\n"
 
-        prompt = self.chat_prompt.format(
-            cv_content=cv_content or "Không có thông tin CV",
-            chat_history=chat_history_text,
-            question=question
-        )
+        if language == "en":
+            prompt = f"""Based on the CV information and previous conversation, please answer the following question professionally and helpfully.
+
+            CV Information:
+            {cv_content or "No CV information available"}
+
+            Conversation history:
+            {chat_history_text}
+
+            Question: {question}
+
+            Answer:"""
+        else:
+            prompt = f"""Dựa trên thông tin CV và cuộc hội thoại trước đó, hãy trả lời câu hỏi sau một cách chuyên nghiệp và hữu ích.
+
+            Thông tin CV:
+            {cv_content or "Không có thông tin CV"}
+
+            Lịch sử trò chuyện:
+            {chat_history_text}
+
+            Câu hỏi: {question}
+
+            Trả lời:"""
+
         response = await self.generate_response(
             prompt=prompt,
             temperature=0.7
