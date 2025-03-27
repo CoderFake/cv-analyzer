@@ -46,13 +46,14 @@ class Settings(BaseSettings):
 
     #search
     SEARCH_BACKEND: str = "duckduckgo"
-    SEARXNG_URL: str = ""  
+    SEARXNG_URL: str = ""
     SEARXNG_LANGUAGE: str = "vi"
 
     model_config = SettingsConfigDict(
         env_file=f".env.{os.getenv('ENVIRONMENT', 'dev')}",
         env_file_encoding="utf-8",
-        case_sensitive=True
+        case_sensitive=True,
+        extra="ignore"
     )
 
     @field_validator("CORS_ORIGINS")
