@@ -59,17 +59,6 @@ else
     echo "Mô hình đã tồn tại tại $LLM_MODEL_PATH"
 fi
 
-if [ ! -d "/app/LLM_Web_search" ]; then
-    echo "Cài đặt LLM_Web_search để tìm kiếm web nâng cao..."
-    cd /tmp
-    git clone https://github.com/mamei16/LLM_Web_search.git
-    cd LLM_Web_search
-    pip install -e .
-    cd /app
-    ln -s /tmp/LLM_Web_search /app/LLM_Web_search
-fi
-
-
 echo "Chạy migrations database..."
 alembic upgrade head
 
