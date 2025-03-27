@@ -3,20 +3,23 @@ from typing import List, Dict, Any, Optional
 import httpx
 from bs4 import BeautifulSoup
 from duckduckgo_search import DDGS
-
+from app.services.web_search_adapter import search_web, USING_LLM_WEB_SEARCH
 
 class WebSearchService:
     async def search(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
         results = []
         try:
-            with DDGS() as ddgs:
-                for result in ddgs.text(query, region='vn-vi', safesearch='moderate', max_results=max_results):
-                    results.append({
-                        "title": result["title"],
-                        "content": result["body"],
-                        "url": result["href"]
-                    })
-            return results
+            if USING_LLM_WEB_SEARCH:
+                return await search_web(query, max_results)
+            else:
+                with DDGS() as ddgs:
+                    for result in ddgs.text(query, region='vn-vi', safesearch='moderate', max_results=max_results):
+                        results.append({
+                            "title": result["title"],
+                            "content": result["body"],
+                            "url": result["href"]
+                        })
+                return results
         except Exception as e:
             print(f"Error searching with DuckDuckGo: {e}")
             return []

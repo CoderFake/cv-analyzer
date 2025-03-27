@@ -14,9 +14,10 @@ class LLMService:
     def __init__(self):
         self.model = Llama(
             model_path=settings.LLM_MODEL_PATH,
-            n_ctx=4096,
-            n_threads=8,
-            n_gpu_layers=-1
+            n_ctx=2048,
+            n_threads=4,
+            n_gpu_layers=0,
+            n_batch=512
         )
 
         self.system_prompt = """Bạn là trợ lý AI chuyên về tuyển dụng và đánh giá CV. Bạn phân tích CV của các ứng viên để đưa ra đánh giá khách quan, hữu ích. Bạn luôn phân tích kỹ càng thông tin trước khi đưa ra nhận xét. Khi cần thiết, bạn sẽ tìm kiếm thông tin trên web để đánh giá chính xác hơn. Hãy ưu tiên sử dụng tiếng Việt trong các tìm kiếm và phân tích."""
