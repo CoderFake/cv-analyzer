@@ -49,8 +49,7 @@ def download_model_from_hf(model_name: str, output_dir: str):
         output_path = hf_hub_download(
             repo_id=repo_id,
             filename=filename,
-            local_dir=output_dir,
-            local_dir_use_symlinks=False
+            local_dir=output_dir
         )
         logger.info(f"Tải mô hình thành công: {output_path}")
         return output_path
