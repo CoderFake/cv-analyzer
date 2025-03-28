@@ -2,6 +2,7 @@ fastapi==0.110.0
 uvicorn==0.27.1
 pydantic==2.6.1
 pydantic[email]
+pydantic_settings==2.8.1
 python-multipart==0.0.6
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
@@ -21,6 +22,7 @@ pillow==10.2.0
 duckduckgo-search==3.9.9
 beautifulsoup4==4.12.2
 boto3==1.34.41
+langdetect==1.0.9
 
 # Requirements for LLM Web Search
 faiss-cpu==1.10.0
