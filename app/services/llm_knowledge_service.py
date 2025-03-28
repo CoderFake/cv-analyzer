@@ -1,3 +1,4 @@
+import asyncio
 from typing import List, Optional, Dict, Any
 from uuid import UUID
 
@@ -14,8 +15,21 @@ class LLMKnowledgeService:
         self.knowledge_repo = KnowledgeRepository(db)
 
     async def get_relevant_knowledge(self, query: str, max_results: int = 3) -> List[Dict[str, Any]]:
-        knowledge_docs = await self.knowledge_repo.search_knowledge(query)
-        knowledge_docs = knowledge_docs[:max_results]
+        search_task = asyncio.create_task(self.knowledge_repo.search_knowledge(query))
+
+        if hasattr(self, 'current_category') and self.current_category:
+            category_task = asyncio.create_task(self.knowledge_repo.get_by_category(self.current_category))
+            search_docs, category_docs = await asyncio.gather(search_task, category_task)
+        else:
+            search_docs = await search_task
+            category_docs = []
+
+        unique_docs = {}
+        for doc in search_docs + category_docs:
+            if str(doc.id) not in unique_docs:
+                unique_docs[str(doc.id)] = doc
+
+        knowledge_docs = list(unique_docs.values())[:max_results]
 
         results = []
         for doc in knowledge_docs:

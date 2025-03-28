@@ -15,8 +15,10 @@ services:
     environment:
       - LLM_MODEL_PATH=/models/llama-2-7b-chat.Q4_K_M.gguf
       - MODEL_NAME=llama-2-7b-chat-gguf
+      - OLLAMA_BASE_URL=http://ollama:11434
     depends_on:
       - db
+      - ollama
     networks:
       - app-network
 
@@ -40,6 +42,23 @@ services:
     networks:
       - app-network
 
+  ollama:
+    image: ollama/ollama:latest
+    container_name: cv-analyzer-ollama
+    restart: always
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+
 networks:
   app-network:
     driver: bridge
@@ -47,3 +66,4 @@ networks:
 volumes:
   postgres-data:
   models_data:
+  ollama-data:

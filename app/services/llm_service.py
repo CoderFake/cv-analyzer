@@ -1,3 +1,4 @@
+import asyncio
 import re
 from typing import List, Dict, Any, Optional, Union, Tuple
 import os
@@ -6,6 +7,7 @@ import json
 from llama_cpp import Llama
 
 from app.core.config import settings
+from app.services.context_classifier import context_classifier
 from app.services.web_search_service import web_search_service
 from langdetect import detect, LangDetectException
 
@@ -125,18 +127,32 @@ class LLMService:
             use_search: bool = True
     ) -> Dict[str, Any]:
         if use_search:
-            search_query = f"Yêu cầu tuyển dụng vị trí {position} và kỹ năng cần thiết"
+            search_query = f"Yêu cầu tuyển dụng vị trí {position} kỹ năng cần thiết gần đây nhất"
 
-            search_results = await web_search_service.process_search_results(search_query)
+            search_task = asyncio.create_task(web_search_service.process_search_results(search_query))
 
-            search_text = ""
-            for idx, result in enumerate(search_results.get("search_results", []), 1):
-                search_text += f"{idx}. {result['title']}: {result['content']}\n\n"
-            prompt = self.cv_evaluation_with_search_prompt.format(
+            base_prompt = self.cv_evaluation_prompt.format(
                 position=position,
-                cv_content=cv_content,
-                search_results=search_text
+                cv_content=cv_content
             )
+
+            try:
+                search_results = await asyncio.wait_for(search_task, timeout=5.0)
+
+                search_text = ""
+                for idx, result in enumerate(search_results.get("search_results", []), 1):
+                    search_text += f"{idx}. {result['title']}: {result['content']}\n\n"
+
+                if len(search_text) < 100:
+                    prompt = base_prompt
+                else:
+                    prompt = self.cv_evaluation_with_search_prompt.format(
+                        position=position,
+                        cv_content=cv_content,
+                        search_results=search_text
+                    )
+            except asyncio.TimeoutError:
+                prompt = base_prompt
         else:
             prompt = self.cv_evaluation_prompt.format(
                 position=position,
@@ -157,8 +173,10 @@ class LLMService:
             chat_history: List[Dict[str, str]] = None,
             cv_content: Optional[str] = None
     ) -> str:
-
         language = self.detect_language(question)
+
+        needs_web_search = context_classifier.needs_web_search(question)
+        needs_knowledge = context_classifier.should_use_knowledge_base(question)
 
         chat_history_text = ""
         if chat_history:
@@ -166,6 +184,37 @@ class LLMService:
                 role = message.get("role", "")
                 content = message.get("content", "")
                 chat_history_text += f"{role.capitalize()}: {content}\n"
+
+        search_results_text = ""
+        if needs_web_search:
+            try:
+                search_task = asyncio.create_task(web_search_service.process_search_results(question))
+                search_results = await asyncio.wait_for(search_task, timeout=4.0)
+
+                for idx, result in enumerate(search_results.get("extracted_content", []), 1):
+                    search_results_text += f"\nKết quả tìm kiếm {idx}:\n"
+                    search_results_text += f"Tiêu đề: {result.get('title', 'Không có tiêu đề')}\n"
+                    search_results_text += f"Nội dung: {result.get('content', 'Không có nội dung')}\n"
+                    search_results_text += f"Nguồn: {result.get('url', 'Không có URL')}\n"
+            except (asyncio.TimeoutError, Exception) as e:
+                print(f"Web search error or timeout: {e}")
+                search_results_text = ""
+
+        base_prompt = f"""Dựa trên thông tin CV và cuộc hội thoại trước đó, hãy trả lời câu hỏi sau một cách chuyên nghiệp và hữu ích.
+
+        Thông tin CV:
+        {cv_content or "Không có thông tin CV"}
+
+        Lịch sử trò chuyện:
+        {chat_history_text}
+        """
+
+        if needs_web_search and search_results_text:
+            web_info = f"""
+            Thông tin tìm kiếm web:
+            {search_results_text}
+            """
+            base_prompt += web_info
 
         if language == "en":
             prompt = f"""Based on the CV information and previous conversation, please answer the following question professionally and helpfully.
@@ -175,70 +224,107 @@ class LLMService:
 
             Conversation history:
             {chat_history_text}
+            """
 
+            if needs_web_search and search_results_text:
+                prompt += f"""
+                Web search information:
+                {search_results_text}
+                """
+
+            prompt += f"""
             Question: {question}
 
             Answer:"""
         else:
-            prompt = f"""Dựa trên thông tin CV và cuộc hội thoại trước đó, hãy trả lời câu hỏi sau một cách chuyên nghiệp và hữu ích.
-
-            Thông tin CV:
-            {cv_content or "Không có thông tin CV"}
-
-            Lịch sử trò chuyện:
-            {chat_history_text}
-
+            prompt = base_prompt + f"""
             Câu hỏi: {question}
 
             Trả lời:"""
 
+        temperature = 0.5 if search_results_text else 0.7
+
         response = await self.generate_response(
             prompt=prompt,
-            temperature=0.7
+            temperature=temperature
         )
 
         return response
 
-    def _parse_cv_evaluation(self, evaluation_text: str) -> Dict[str, Any]:
-        result = {
-            "grade": "C",
-            "evaluation": evaluation_text,
-            "summary": "",
-            "strengths": [],
-            "weaknesses": [],
-            "recommendations": []
-        }
+    async def process_document(
+            self,
+            document_content: str,
+            document_type: str,
+            user_query: str
+    ) -> str:
+        doc_type_explanation = ""
+        if document_type.lower() in ['.pdf', '.docx', '.doc']:
+            doc_type_explanation = "CV hoặc tài liệu văn bản"
+        elif document_type.lower() in ['.jpg', '.jpeg', '.png']:
+            doc_type_explanation = "hình ảnh"
+        else:
+            doc_type_explanation = "tài liệu"
 
-        grade_match = re.search(r"(Đánh giá tổng thể|thang điểm).*?[:]\s*([A-E])", evaluation_text, re.IGNORECASE)
-        if grade_match:
-            result["grade"] = grade_match.group(2).upper()
+        if len(document_content) > 10000:
+            document_content = document_content[:10000] + "...(nội dung đã bị cắt để tiết kiệm bộ nhớ)..."
 
-        summary_match = re.search(r"(Tóm tắt|Summary)[:]\s*(.*?)(?:\n|$)", evaluation_text, re.IGNORECASE | re.DOTALL)
-        if summary_match:
-            result["summary"] = summary_match.group(2).strip()
+        prompt = f"""Dưới đây là nội dung từ {doc_type_explanation} được tải lên. Phân tích và trả lời câu hỏi người dùng một cách ngắn gọn, rõ ràng.
 
-        strengths_section = re.search(
-            r"(Điểm mạnh|Strengths)[:]\s*(.*?)(?=Điểm yếu|Weaknesses|Khuyến nghị|Recommendations|$)", evaluation_text,
-            re.IGNORECASE | re.DOTALL)
-        if strengths_section:
-            strengths_text = strengths_section.group(2).strip()
-            strengths = re.findall(r"(?:^|\n)[-•*]?\s*(.*?)(?:\n|$)", strengths_text)
-            result["strengths"] = [s.strip() for s in strengths if s.strip()]
+        Nội dung tài liệu:
+        {document_content}
 
-        weaknesses_section = re.search(r"(Điểm yếu|Weaknesses)[:]\s*(.*?)(?=Khuyến nghị|Recommendations|$)",
-                                       evaluation_text, re.IGNORECASE | re.DOTALL)
-        if weaknesses_section:
-            weaknesses_text = weaknesses_section.group(2).strip()
-            weaknesses = re.findall(r"(?:^|\n)[-•*]?\s*(.*?)(?:\n|$)", weaknesses_text)
-            result["weaknesses"] = [w.strip() for w in weaknesses if w.strip()]
+        Yêu cầu của người dùng:
+        {user_query}
 
-        recommendations_section = re.search(r"(Khuyến nghị|Recommendations)[:]\s*(.*?)(?=$)", evaluation_text,
-                                            re.IGNORECASE | re.DOTALL)
-        if recommendations_section:
-            recommendations_text = recommendations_section.group(2).strip()
-            recommendations = re.findall(r"(?:^|\n)[-•*]?\s*(.*?)(?:\n|$)", recommendations_text)
-            result["recommendations"] = [r.strip() for r in recommendations if r.strip()]
+        Phân tích và trả lời:"""
 
-        return result
+        response = await self.generate_response(
+            prompt=prompt,
+            temperature=0.4,
+            max_tokens=1024
+        )
+
+        return response
+
+    async def process_document(
+            self,
+            document_content: str,
+            document_type: str,
+            user_query: str
+    ) -> str:
+
+        doc_type_description = "tài liệu"
+        if document_type.lower() in ['.pdf', '.docx', '.doc']:
+            doc_type_description = "tài liệu văn bản"
+        elif document_type.lower() in ['.jpg', '.jpeg', '.png']:
+            doc_type_description = "hình ảnh"
+        elif document_type.lower() == '.txt':
+            doc_type_description = "tệp văn bản"
+
+        max_content_length = 10000
+        if len(document_content) > max_content_length:
+            document_content = document_content[:max_content_length] + "...[nội dung bị cắt do quá dài]"
+
+        prompt = f"""Dưới đây là nội dung từ {doc_type_description} được tải lên. 
+        Hãy phân tích và trả lời yêu cầu của người dùng một cách rõ ràng, chi tiết.
+
+        Nội dung tài liệu:
+        {document_content}
+
+        Yêu cầu của người dùng:
+        {user_query}
+
+        Hãy cung cấp phân tích chi tiết, rõ ràng và hữu ích:"""
+
+        language = self.detect_language(document_content + " " + user_query)
+        system_prompt = self.system_prompt if language == "vi" else """You are an AI assistant specializing in document analysis. You analyze and provide helpful insights on documents uploaded by users. Always analyze thoroughly before giving feedback."""
+
+        response = await self.generate_response(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=0.3
+        )
+
+        return response
 
 llm_service = LLMService()

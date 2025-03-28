@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     LLM_MAX_TOKENS: int
     LLM_TEMPERATURE: float
 
+    # Ollama
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "gemma3"
+    USE_OLLAMA: bool = True
+
     # Web Search
     SEARCH_RESULTS_PER_QUERY: int = 5
     SEARCH_BACKEND: str = "llm_web_search"
@@ -53,6 +58,7 @@ class Settings(BaseSettings):
     APP_DESCRIPTION: Optional[str] = None
     APP_VERSION: Optional[str] = None
     MODEL_NAME: Optional[str] = None
+    ENABLE_MEMORY_MONITORING: Optional[str] = False
 
     model_config = SettingsConfigDict(
         env_file=f".env.{os.getenv('ENVIRONMENT', 'dev')}",
@@ -60,6 +66,10 @@ class Settings(BaseSettings):
         case_sensitive=True,
         extra="ignore"
     )
+
+    @property
+    def llm_service_type(self) -> str:
+        return "ollama" if self.USE_OLLAMA else "local"
 
     @field_validator("CORS_ORIGINS")
     def assemble_cors_origins(cls, v):

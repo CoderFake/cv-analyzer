@@ -3,6 +3,7 @@ set -e
 
 LLM_MODEL_PATH=${LLM_MODEL_PATH:-"/models/llama-2-7b-chat.Q4_K_M.gguf"}
 MODEL_NAME=${MODEL_NAME:-"llama-2-7b-chat-gguf"}
+USE_OLLAMA=${USE_OLLAMA:-"false"}
 
 DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@db:5432/cv_analyzer}
 
@@ -50,13 +51,37 @@ async def check_db():
 asyncio.run(check_db())
 "
 
-echo "Kiểm tra mô hình LLM..."
-if [ ! -f "$LLM_MODEL_PATH" ]; then
-    echo "Mô hình LLM không tìm thấy tại $LLM_MODEL_PATH"
-    echo "Bắt đầu tải mô hình $MODEL_NAME..."
-    python -m app.utils.download_model --model $MODEL_NAME --output-dir $(dirname "$LLM_MODEL_PATH")
+if [ "$USE_OLLAMA" = "true" ]; then
+    echo "Kiểm tra kết nối với Ollama..."
+    OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-"http://ollama:11434"}
+
+    max_retries=20
+    retry_count=0
+
+    while [ $retry_count -lt $max_retries ]; do
+        if curl -s "$OLLAMA_BASE_URL/api/tags" > /dev/null; then
+            echo "Kết nối với Ollama thành công!"
+            break
+        else
+            retry_count=$((retry_count+1))
+            echo "Đợi Ollama khởi động (lần thử $retry_count/$max_retries)..."
+            sleep 5
+        fi
+    done
+
+    if [ $retry_count -eq $max_retries ]; then
+        echo "Không thể kết nối với Ollama sau $max_retries lần thử"
+        echo "Tiếp tục khởi động ứng dụng, nhưng Ollama có thể không khả dụng"
+    fi
 else
-    echo "Mô hình đã tồn tại tại $LLM_MODEL_PATH"
+    echo "Kiểm tra mô hình LLM..."
+    if [ ! -f "$LLM_MODEL_PATH" ]; then
+        echo "Mô hình LLM không tìm thấy tại $LLM_MODEL_PATH"
+        echo "Bắt đầu tải mô hình $MODEL_NAME..."
+        python -m app.utils.download_model --model $MODEL_NAME --output-dir $(dirname "$LLM_MODEL_PATH")
+    else
+        echo "Mô hình đã tồn tại tại $LLM_MODEL_PATH"
+    fi
 fi
 
 echo "Chạy migrations database..."
