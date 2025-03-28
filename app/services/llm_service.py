@@ -1,27 +1,74 @@
-import asyncio
 import re
 from typing import List, Dict, Any, Optional, Union, Tuple
 import os
 import json
-
-from llama_cpp import Llama
+import logging
 
 from app.core.config import settings
 from app.services.context_classifier import context_classifier
 from app.services.web_search_service import web_search_service
 from langdetect import detect, LangDetectException
 
+# Configure logging
+logger = logging.getLogger("llm-service")
+
 
 class LLMService:
-
     def __init__(self):
-        self.model = Llama(
-            model_path=settings.LLM_MODEL_PATH,
-            n_ctx=2048,
-            n_threads=4,
-            n_gpu_layers=0,
-            n_batch=512
-        )
+        self.use_ollama = settings.USE_OLLAMA
+        self.model = None
+
+        if not self.use_ollama:
+            try:
+                from llama_cpp import Llama
+
+                model_path = settings.LLM_MODEL_PATH
+
+                if not os.path.exists(model_path):
+                    logger.warning(f"Model path does not exist: {model_path}")
+                    logger.info("Attempting to download model...")
+
+                    try:
+                        from app.utils.download_model import check_and_download_model
+                        success = check_and_download_model(model_path)
+
+                        if not success:
+                            logger.warning("Failed to download model, falling back to Ollama")
+                            self.use_ollama = True
+                        else:
+                            self.model = Llama(
+                                model_path=model_path,
+                                n_ctx=2048,
+                                n_threads=4,
+                                n_gpu_layers=0,
+                                n_batch=512
+                            )
+                            logger.info(f"Successfully initialized local LLM model from {model_path}")
+                    except Exception as e:
+                        logger.error(f"Error downloading model: {str(e)}")
+                        logger.warning("Falling back to Ollama service")
+                        self.use_ollama = True
+                else:
+                    # Model exists, initialize it
+                    self.model = Llama(
+                        model_path=model_path,
+                        n_ctx=2048,
+                        n_threads=4,
+                        n_gpu_layers=0,
+                        n_batch=512
+                    )
+                    logger.info(f"Successfully initialized local LLM model from {model_path}")
+
+            except ImportError:
+                logger.warning("Could not import llama_cpp, falling back to Ollama")
+                self.use_ollama = True
+            except Exception as e:
+                logger.error(f"Error initializing local LLM model: {str(e)}")
+                logger.warning("Falling back to Ollama service")
+                self.use_ollama = True
+
+        if self.use_ollama:
+            logger.info("Using Ollama for LLM processing")
 
         self.system_prompt = """Bạn là trợ lý AI chuyên về tuyển dụng và đánh giá CV. Bạn phân tích CV của các ứng viên để đưa ra đánh giá khách quan, hữu ích. Bạn luôn phân tích kỹ càng thông tin trước khi đưa ra nhận xét. Khi cần thiết, bạn sẽ tìm kiếm thông tin trên web để đánh giá chính xác hơn. Hãy ưu tiên sử dụng tiếng Việt trong các tìm kiếm và phân tích."""
 
@@ -29,14 +76,14 @@ class LLMService:
 
         Nội dung CV:
         {cv_content}
-        
+
         Vui lòng đánh giá theo thang điểm sau:
         A: Xuất sắc - Vượt trội, phù hợp hoàn hảo với vị trí
         B: Tốt - Đáp ứng tốt yêu cầu, có nhiều điểm mạnh
         C: Trung bình - Đáp ứng được các yêu cầu cơ bản
         D: Dưới trung bình - Còn thiếu nhiều kỹ năng/kinh nghiệm cần thiết
         E: Không phù hợp - Không đáp ứng được các yêu cầu của vị trí
-        
+
         Trả về kết quả theo cấu trúc:
         - Đánh giá tổng thể (thang điểm A-E): [thang điểm]
         - Nhận xét chi tiết: [nhận xét]
@@ -50,17 +97,17 @@ class LLMService:
 
         Nội dung CV:
         {cv_content}
-        
+
         Thông tin thị trường tuyển dụng:
         {search_results}
-        
+
         Vui lòng đánh giá theo thang điểm sau:
         A: Xuất sắc - Vượt trội, phù hợp hoàn hảo với vị trí
         B: Tốt - Đáp ứng tốt yêu cầu, có nhiều điểm mạnh
         C: Trung bình - Đáp ứng được các yêu cầu cơ bản
         D: Dưới trung bình - Còn thiếu nhiều kỹ năng/kinh nghiệm cần thiết
         E: Không phù hợp - Không đáp ứng được các yêu cầu của vị trí
-        
+
         Trả về kết quả theo cấu trúc:
         - Đánh giá tổng thể (thang điểm A-E): [thang điểm]
         - Nhận xét chi tiết: [nhận xét]
@@ -74,12 +121,12 @@ class LLMService:
 
         Thông tin CV:
         {cv_content}
-        
+
         Lịch sử trò chuyện:
         {chat_history}
-        
+
         Câu hỏi: {question}
-        
+
         Trả lời:"""
 
     def detect_language(self, text: str) -> str:
@@ -96,29 +143,66 @@ class LLMService:
             max_tokens: int = 2048,
             temperature: float = 0.7
     ) -> str:
-
-        language = self.detect_language(prompt)
-
         if system_prompt is None:
+            language = self.detect_language(prompt)
+
             if language == "en":
                 system_prompt = """You are an AI assistant specializing in resume analysis and evaluation. You analyze candidates' CVs to provide objective and helpful assessments. You always analyze information thoroughly before giving feedback. When necessary, you search the web for information to provide more accurate evaluations. Please respond in English."""
             else:
                 system_prompt = self.system_prompt
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
-        ]
+        if self.use_ollama:
+            try:
+                import httpx
+                import json
 
-        response = self.model.create_chat_completion(
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            stop=["<|im_end|>", "<|endoftext|>"]
-        )
+                ollama_url = f"{settings.OLLAMA_BASE_URL}/api/generate"
+                ollama_model = settings.OLLAMA_MODEL
 
-        reply = response["choices"][0]["message"]["content"]
-        return reply
+                payload = {
+                    "model": ollama_model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "stream": False,
+                    "options": {
+                        "temperature": temperature,
+                        "num_predict": max_tokens
+                    }
+                }
+
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    response = await client.post(ollama_url, json=payload)
+                    response_data = response.json()
+
+                    return response_data["message"]["content"]
+
+            except Exception as e:
+                logger.error(f"Error generating response from Ollama: {str(e)}")
+                return f"Xin lỗi, đã xảy ra lỗi khi xử lý yêu cầu của bạn. Chi tiết lỗi: {str(e)}"
+
+        elif self.model:
+            try:
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ]
+
+                response = self.model.create_chat_completion(
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    stop=["<|im_end|>", "<|endoftext|>"]
+                )
+
+                reply = response["choices"][0]["message"]["content"]
+                return reply
+            except Exception as e:
+                logger.error(f"Error generating response from local LLM: {str(e)}")
+                return f"Xin lỗi, đã xảy ra lỗi khi xử lý yêu cầu của bạn. Chi tiết lỗi: {str(e)}"
+        else:
+            return "Xin lỗi, không thể tạo câu trả lời vì không có mô hình LLM nào được cấu hình đúng."
 
     async def evaluate_cv(
             self,
@@ -126,6 +210,8 @@ class LLMService:
             position: str,
             use_search: bool = True
     ) -> Dict[str, Any]:
+        import asyncio
+
         if use_search:
             search_query = f"Yêu cầu tuyển dụng vị trí {position} kỹ năng cần thiết gần đây nhất"
 
@@ -173,6 +259,8 @@ class LLMService:
             chat_history: List[Dict[str, str]] = None,
             cv_content: Optional[str] = None
     ) -> str:
+        import asyncio
+
         language = self.detect_language(question)
 
         needs_web_search = context_classifier.needs_web_search(question)
@@ -257,42 +345,6 @@ class LLMService:
             document_type: str,
             user_query: str
     ) -> str:
-        doc_type_explanation = ""
-        if document_type.lower() in ['.pdf', '.docx', '.doc']:
-            doc_type_explanation = "CV hoặc tài liệu văn bản"
-        elif document_type.lower() in ['.jpg', '.jpeg', '.png']:
-            doc_type_explanation = "hình ảnh"
-        else:
-            doc_type_explanation = "tài liệu"
-
-        if len(document_content) > 10000:
-            document_content = document_content[:10000] + "...(nội dung đã bị cắt để tiết kiệm bộ nhớ)..."
-
-        prompt = f"""Dưới đây là nội dung từ {doc_type_explanation} được tải lên. Phân tích và trả lời câu hỏi người dùng một cách ngắn gọn, rõ ràng.
-
-        Nội dung tài liệu:
-        {document_content}
-
-        Yêu cầu của người dùng:
-        {user_query}
-
-        Phân tích và trả lời:"""
-
-        response = await self.generate_response(
-            prompt=prompt,
-            temperature=0.4,
-            max_tokens=1024
-        )
-
-        return response
-
-    async def process_document(
-            self,
-            document_content: str,
-            document_type: str,
-            user_query: str
-    ) -> str:
-
         doc_type_description = "tài liệu"
         if document_type.lower() in ['.pdf', '.docx', '.doc']:
             doc_type_description = "tài liệu văn bản"
@@ -327,4 +379,48 @@ class LLMService:
 
         return response
 
+    def _parse_cv_evaluation(self, evaluation_text: str) -> Dict[str, Any]:
+        result = {
+            "grade": "C",
+            "evaluation": evaluation_text,
+            "summary": "",
+            "strengths": [],
+            "weaknesses": [],
+            "recommendations": []
+        }
+
+        grade_match = re.search(r"(Đánh giá tổng thể|thang điểm).*?[:]\s*([A-E])", evaluation_text, re.IGNORECASE)
+        if grade_match:
+            result["grade"] = grade_match.group(2).upper()
+
+        summary_match = re.search(r"(Tóm tắt|Summary)[:]\s*(.*?)(?:\n|$)", evaluation_text, re.IGNORECASE | re.DOTALL)
+        if summary_match:
+            result["summary"] = summary_match.group(2).strip()
+
+        strengths_section = re.search(
+            r"(Điểm mạnh|Strengths)[:]\s*(.*?)(?=Điểm yếu|Weaknesses|Khuyến nghị|Recommendations|$)", evaluation_text,
+            re.IGNORECASE | re.DOTALL)
+        if strengths_section:
+            strengths_text = strengths_section.group(2).strip()
+            strengths = re.findall(r"(?:^|\n)[-•*]?\s*(.*?)(?:\n|$)", strengths_text)
+            result["strengths"] = [s.strip() for s in strengths if s.strip()]
+
+        weaknesses_section = re.search(r"(Điểm yếu|Weaknesses)[:]\s*(.*?)(?=Khuyến nghị|Recommendations|$)",
+                                       evaluation_text, re.IGNORECASE | re.DOTALL)
+        if weaknesses_section:
+            weaknesses_text = weaknesses_section.group(2).strip()
+            weaknesses = re.findall(r"(?:^|\n)[-•*]?\s*(.*?)(?:\n|$)", weaknesses_text)
+            result["weaknesses"] = [w.strip() for w in weaknesses if w.strip()]
+
+        recommendations_section = re.search(r"(Khuyến nghị|Recommendations)[:]\s*(.*?)(?=$)", evaluation_text,
+                                            re.IGNORECASE | re.DOTALL)
+        if recommendations_section:
+            recommendations_text = recommendations_section.group(2).strip()
+            recommendations = re.findall(r"(?:^|\n)[-•*]?\s*(.*?)(?:\n|$)", recommendations_text)
+            result["recommendations"] = [r.strip() for r in recommendations if r.strip()]
+
+        return result
+
+
+# Initialize service
 llm_service = LLMService()

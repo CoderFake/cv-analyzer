@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # Ollama
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "gemma3"
+    OLLAMA_MODEL: str = "kwangsuklee/gemma3-4b-it-Q8"
     USE_OLLAMA: bool = True
 
     # Web Search
@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     APP_DESCRIPTION: Optional[str] = None
     APP_VERSION: Optional[str] = None
     MODEL_NAME: Optional[str] = None
-    ENABLE_MEMORY_MONITORING: Optional[str] = False
+    ENABLE_MEMORY_MONITORING: Optional[bool] = False
 
     model_config = SettingsConfigDict(
         env_file=f".env.{os.getenv('ENVIRONMENT', 'dev')}",

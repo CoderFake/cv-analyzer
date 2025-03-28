@@ -1,37 +1,62 @@
-import asyncio
-import json
-import httpx
-from typing import List, Dict, Any, Optional
 import re
-from concurrent.futures import ThreadPoolExecutor
+import asyncio
+import logging
+from typing import List, Dict, Any, Optional
+
+import httpx
+from langdetect import detect, LangDetectException
 
 from app.core.config import settings
+from app.services.context_classifier import context_classifier
+from app.services.web_search_service import web_search_service
+
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("llm-service")
 
 
 class OllamaLLMService:
     def __init__(self):
         self.base_url = settings.OLLAMA_BASE_URL
         self.model = settings.OLLAMA_MODEL
-        self.system_prompt = """Bạn là trợ lý AI chuyên về tuyển dụng và đánh giá CV. Bạn phân tích CV của các ứng viên để đưa ra đánh giá khách quan, hữu ích. Bạn luôn phân tích kỹ càng thông tin trước khi đưa ra nhận xét. Khi cần thiết, bạn sẽ tìm kiếm thông tin trên web để đánh giá chính xác hơn. Hãy ưu tiên sử dụng tiếng Việt trong các tìm kiếm và phân tích."""
-        self.executor = ThreadPoolExecutor(max_workers=4)
         self.client = httpx.AsyncClient(timeout=60.0)
 
-        self._check_ollama_connection()
+        self._check_ollama_model()
 
-    def _check_ollama_connection(self):
+        self.system_prompt = """Bạn là trợ lý AI chuyên về tuyển dụng và đánh giá CV. Bạn phân tích CV của các ứng viên để đưa ra đánh giá khách quan, hữu ích. Bạn luôn phân tích kỹ càng thông tin trước khi đưa ra nhận xét. Khi cần thiết, bạn sẽ tìm kiếm thông tin trên web để đánh giá chính xác hơn. Hãy ưu tiên sử dụng tiếng Việt trong các tìm kiếm và phân tích."""
+
+    def _check_ollama_model(self):
         import requests
         try:
-            requests.get(f"{self.base_url}/api/tags", timeout=5)
-            print(f"Successfully connected to Ollama at {self.base_url}")
+            response = requests.get(f"{self.base_url}/api/tags", timeout=5)
+            response.raise_for_status()
 
-            response = requests.get(f"{self.base_url}/api/tags")
             models = response.json().get("models", [])
-            if not any(model.get("name") == self.model for model in models):
-                print(f"Model {self.model} not found, attempting to pull...")
-                requests.post(f"{self.base_url}/api/pull", json={"name": self.model})
+            model_names = [model.get("name") for model in models]
+
+            if self.model not in model_names:
+                logger.warning(f"Mô hình {self.model} không có trong danh sách mô hình. Thử tải mô hình...")
+                pull_response = requests.post(
+                    f"{self.base_url}/api/pull",
+                    json={"name": self.model},
+                    timeout=10
+                )
+                if pull_response.status_code == 200:
+                    logger.info(f"Đã bắt đầu tải mô hình {self.model}")
+                else:
+                    logger.error(f"Không thể tải mô hình {self.model}: {pull_response.text}")
+            else:
+                logger.info(f"Mô hình {self.model} đã sẵn sàng")
+
         except Exception as e:
-            print(f"Warning: Could not connect to Ollama: {e}")
-            print("Make sure the Ollama service is running and accessible")
+            logger.error(f"Không thể kết nối với Ollama: {str(e)}")
+
+    def detect_language(self, text: str) -> str:
+        try:
+            lang = detect(text)
+            return "en" if lang == "en" else "vi"
+        except LangDetectException:
+            return "vi"
 
     async def generate_response(
             self,
@@ -41,31 +66,39 @@ class OllamaLLMService:
             temperature: float = 0.7
     ) -> str:
         if system_prompt is None:
-            system_prompt = self.system_prompt
+            language = self.detect_language(prompt)
 
-        url = f"{self.base_url}/api/chat"
-
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ],
-            "stream": False,
-            "options": {
-                "temperature": temperature,
-                "num_predict": max_tokens
-            }
-        }
+            if language == "en":
+                system_prompt = """You are an AI assistant specializing in resume analysis and evaluation. You analyze candidates' CVs to provide objective and helpful assessments. You always analyze information thoroughly before giving feedback. When necessary, you search the web for information to provide more accurate evaluations. Please respond in English."""
+            else:
+                system_prompt = self.system_prompt
 
         try:
+            url = f"{self.base_url}/api/generate"
+
+            payload = {
+                "model": self.model,
+                "prompt": f"{system_prompt}\n\n{prompt}",
+                "stream": False,
+                "options": {
+                    "temperature": temperature,
+                    "num_predict": max_tokens
+                }
+            }
+
             response = await self.client.post(url, json=payload)
             response.raise_for_status()
             response_data = response.json()
-            return response_data["message"]["content"]
+
+            if "response" in response_data:
+                return response_data["response"]
+            else:
+                logger.error(f"Phản hồi không đúng định dạng: {response_data}")
+                return "Xin lỗi, đã có lỗi xử lý yêu cầu của bạn."
+
         except Exception as e:
-            print(f"Error generating response from Ollama: {e}")
-            return "Xin lỗi, đã xảy ra lỗi khi xử lý yêu cầu của bạn."
+            logger.error(f"Lỗi khi gọi API Ollama: {str(e)}")
+            return f"Xin lỗi, đã xảy ra lỗi khi xử lý yêu cầu của bạn. Chi tiết lỗi: {str(e)}"
 
     async def evaluate_cv(
             self,
@@ -73,63 +106,53 @@ class OllamaLLMService:
             position: str,
             use_search: bool = True
     ) -> Dict[str, Any]:
-        from app.services.web_search_service import web_search_service
+        prompt_template = """Hãy phân tích CV này cho vị trí {position} dựa trên các yếu tố: học vấn, kinh nghiệm, kỹ năng, các thành tựu và sự phù hợp với vị trí. 
 
+        Nội dung CV:
+        {cv_content}
+
+        {search_info}
+
+        Vui lòng đánh giá theo thang điểm sau:
+        A: Xuất sắc - Vượt trội, phù hợp hoàn hảo với vị trí
+        B: Tốt - Đáp ứng tốt yêu cầu, có nhiều điểm mạnh
+        C: Trung bình - Đáp ứng được các yêu cầu cơ bản
+        D: Dưới trung bình - Còn thiếu nhiều kỹ năng/kinh nghiệm cần thiết
+        E: Không phù hợp - Không đáp ứng được các yêu cầu của vị trí
+
+        Trả về kết quả theo cấu trúc:
+        - Đánh giá tổng thể (thang điểm A-E): [thang điểm]
+        - Nhận xét chi tiết: [nhận xét]
+        - Tóm tắt: [tóm tắt ngắn gọn]
+        - Điểm mạnh: [điểm mạnh]
+        - Điểm yếu: [điểm yếu]
+        - Khuyến nghị: [khuyến nghị cải thiện]
+        """
+
+        search_info = ""
         if use_search:
-            search_task = asyncio.create_task(
-                web_search_service.process_search_results(f"Yêu cầu tuyển dụng vị trí {position} và kỹ năng cần thiết")
-            )
+            search_query = f"Yêu cầu tuyển dụng vị trí {position} kỹ năng cần thiết gần đây nhất"
+            try:
+                search_task = asyncio.create_task(web_search_service.process_search_results(search_query))
+                search_results = await asyncio.wait_for(search_task, timeout=5.0)
 
-            search_results = await search_task
+                search_text = ""
+                for idx, result in enumerate(search_results.get("search_results", []), 1):
+                    search_text += f"{idx}. {result['title']}: {result['content']}\n\n"
 
-            search_text = ""
-            for idx, result in enumerate(search_results.get("search_results", []), 1):
-                search_text += f"{idx}. {result['title']}: {result['content']}\n\n"
+                if len(search_text) > 100:
+                    search_info = f"Thông tin thị trường tuyển dụng:\n{search_text}"
+            except asyncio.TimeoutError:
+                search_info = ""
+            except Exception as e:
+                logger.error(f"Lỗi khi tìm kiếm: {str(e)}")
+                search_info = ""
 
-            prompt = f"""Hãy phân tích CV này cho vị trí {position} dựa trên các yếu tố: học vấn, kinh nghiệm, kỹ năng, các thành tựu và sự phù hợp với vị trí. 
-
-            Nội dung CV:
-            {cv_content}
-
-            Thông tin thị trường tuyển dụng:
-            {search_text}
-
-            Vui lòng đánh giá theo thang điểm sau:
-            A: Xuất sắc - Vượt trội, phù hợp hoàn hảo với vị trí
-            B: Tốt - Đáp ứng tốt yêu cầu, có nhiều điểm mạnh
-            C: Trung bình - Đáp ứng được các yêu cầu cơ bản
-            D: Dưới trung bình - Còn thiếu nhiều kỹ năng/kinh nghiệm cần thiết
-            E: Không phù hợp - Không đáp ứng được các yêu cầu của vị trí
-
-            Trả về kết quả theo cấu trúc:
-            - Đánh giá tổng thể (thang điểm A-E): [thang điểm]
-            - Nhận xét chi tiết: [nhận xét]
-            - Tóm tắt: [tóm tắt ngắn gọn]
-            - Điểm mạnh: [điểm mạnh]
-            - Điểm yếu: [điểm yếu]
-            - Khuyến nghị: [khuyến nghị cải thiện]
-            """
-        else:
-            prompt = f"""Hãy phân tích CV này cho vị trí {position} dựa trên các yếu tố: học vấn, kinh nghiệm, kỹ năng, các thành tựu và sự phù hợp với vị trí. 
-
-            Nội dung CV:
-            {cv_content}
-
-            Vui lòng đánh giá theo thang điểm sau:
-            A: Xuất sắc - Vượt trội, phù hợp hoàn hảo với vị trí
-            B: Tốt - Đáp ứng tốt yêu cầu, có nhiều điểm mạnh
-            C: Trung bình - Đáp ứng được các yêu cầu cơ bản
-            D: Dưới trung bình - Còn thiếu nhiều kỹ năng/kinh nghiệm cần thiết
-            E: Không phù hợp - Không đáp ứng được các yêu cầu của vị trí
-
-            Trả về kết quả theo cấu trúc:
-            - Đánh giá tổng thể (thang điểm A-E): [thang điểm]
-            - Nhận xét chi tiết: [nhận xét]
-            - Tóm tắt: [tóm tắt ngắn gọn]
-            - Điểm mạnh: [điểm mạnh]
-            - Điểm yếu: [điểm yếu]
-            - Khuyến nghị: [khuyến nghị cải thiện]
-            """
+        prompt = prompt_template.format(
+            position=position,
+            cv_content=cv_content,
+            search_info=search_info
+        )
 
         response = await self.generate_response(
             prompt=prompt,
@@ -145,6 +168,9 @@ class OllamaLLMService:
             chat_history: List[Dict[str, str]] = None,
             cv_content: Optional[str] = None
     ) -> str:
+        language = self.detect_language(question)
+        needs_web_search = context_classifier.needs_web_search(question)
+
         chat_history_text = ""
         if chat_history:
             for message in chat_history:
@@ -152,70 +178,107 @@ class OllamaLLMService:
                 content = message.get("content", "")
                 chat_history_text += f"{role.capitalize()}: {content}\n"
 
-        prompt = f"""Dựa trên thông tin CV và cuộc hội thoại trước đó, hãy trả lời câu hỏi sau một cách chuyên nghiệp và hữu ích.
+        search_results_text = ""
+        if needs_web_search:
+            try:
+                search_task = asyncio.create_task(web_search_service.process_search_results(question))
+                search_results = await asyncio.wait_for(search_task, timeout=4.0)
+
+                for idx, result in enumerate(search_results.get("extracted_content", []), 1):
+                    search_results_text += f"\nKết quả tìm kiếm {idx}:\n"
+                    search_results_text += f"Tiêu đề: {result.get('title', 'Không có tiêu đề')}\n"
+                    search_results_text += f"Nội dung: {result.get('content', 'Không có nội dung')}\n"
+                    search_results_text += f"Nguồn: {result.get('url', 'Không có URL')}\n"
+            except Exception as e:
+                logger.error(f"Lỗi tìm kiếm: {str(e)}")
+                search_results_text = ""
+
+        base_prompt = f"""Dựa trên thông tin CV và cuộc hội thoại trước đó, hãy trả lời câu hỏi sau một cách chuyên nghiệp và hữu ích.
 
         Thông tin CV:
         {cv_content or "Không có thông tin CV"}
 
         Lịch sử trò chuyện:
         {chat_history_text}
+        """
 
-        Câu hỏi: {question}
+        if search_results_text:
+            web_info = f"""
+            Thông tin tìm kiếm web:
+            {search_results_text}
+            """
+            base_prompt += web_info
 
-        Trả lời:"""
+        if language == "en":
+            prompt = f"""Based on the CV information and previous conversation, please answer the following question professionally and helpfully.
 
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            self.executor,
-            lambda: self._sync_generate_response(prompt, temperature=0.7)
-        )
+            CV Information:
+            {cv_content or "No CV information available"}
 
-    def _sync_generate_response(self, prompt, temperature=0.7):
-        """Synchronous version of generate_response for thread pool execution"""
-        import requests
+            Conversation history:
+            {chat_history_text}
+            """
 
-        url = f"{self.base_url}/api/chat"
+            if search_results_text:
+                prompt += f"""
+                Web search information:
+                {search_results_text}
+                """
 
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": prompt}
-            ],
-            "stream": False,
-            "options": {
-                "temperature": temperature,
-                "num_predict": 2048
-            }
-        }
+            prompt += f"""
+            Question: {question}
 
-        try:
-            response = requests.post(url, json=payload, timeout=60)
-            response.raise_for_status()
-            response_data = response.json()
-            return response_data["message"]["content"]
-        except Exception as e:
-            print(f"Error generating response from Ollama: {e}")
-            return "Xin lỗi, đã xảy ra lỗi khi xử lý yêu cầu của bạn."
+            Answer:"""
+        else:
+            prompt = base_prompt + f"""
+            Câu hỏi: {question}
 
-    async def answer_with_knowledge(
-            self,
-            question: str,
-            context: str,
-            category: Optional[str] = None
-    ) -> str:
-        prompt = f"""Hãy trả lời câu hỏi dựa trên thông tin trong các tài liệu sau. 
-        Nếu thông tin trong tài liệu không đủ để trả lời, hãy cho biết bạn không có đủ thông tin và trả lời dựa trên kiến thức của bạn.
+            Trả lời:"""
 
-        Tài liệu:
-        {context}
-
-        Câu hỏi: {question}
-
-        Trả lời:"""
+        temperature = 0.5 if search_results_text else 0.7
 
         response = await self.generate_response(
             prompt=prompt,
+            temperature=temperature
+        )
+
+        return response
+
+    async def process_document(
+            self,
+            document_content: str,
+            document_type: str,
+            user_query: str
+    ) -> str:
+        doc_type_description = "tài liệu"
+        if document_type.lower() in ['.pdf', '.docx', '.doc']:
+            doc_type_description = "tài liệu văn bản"
+        elif document_type.lower() in ['.jpg', '.jpeg', '.png']:
+            doc_type_description = "hình ảnh"
+        elif document_type.lower() == '.txt':
+            doc_type_description = "tệp văn bản"
+
+        max_content_length = 10000
+        if len(document_content) > max_content_length:
+            document_content = document_content[:max_content_length] + "...[nội dung bị cắt do quá dài]"
+
+        prompt = f"""Dưới đây là nội dung từ {doc_type_description} được tải lên. 
+        Hãy phân tích và trả lời yêu cầu của người dùng một cách rõ ràng, chi tiết.
+
+        Nội dung tài liệu:
+        {document_content}
+
+        Yêu cầu của người dùng:
+        {user_query}
+
+        Hãy cung cấp phân tích chi tiết, rõ ràng và hữu ích:"""
+
+        language = self.detect_language(document_content + " " + user_query)
+        system_prompt = self.system_prompt if language == "vi" else """You are an AI assistant specializing in document analysis. You analyze and provide helpful insights on documents uploaded by users. Always analyze thoroughly before giving feedback."""
+
+        response = await self.generate_response(
+            prompt=prompt,
+            system_prompt=system_prompt,
             temperature=0.3
         )
 

@@ -9,23 +9,12 @@ logger = logging.getLogger("web-search-adapter")
 
 
 try:
-    from app.lib.llm_web_search.llm_web_search import retrieve_from_duckduckgo, Generator, retrieve_from_searxng
-    from app.lib.llm_web_search.retrieval import DocumentRetriever
-
-    document_retriever = DocumentRetriever(
-        device="cpu",
-        num_results=10,
-        similarity_threshold=0.5,
-        chunk_size=500,
-        ensemble_weighting=0.5,
-        keyword_retriever="bm25",
-        chunking_method="character-based"
-    )
-
-    logger.info("Sử dụng LLM_Web_search đã tích hợp.")
+    from app.lib.llm_web_search.llm_web_search import retrieve_from_duckduckgo, Generator
+    from app.lib.llm_web_search.retrieval import DocumentRetriever, docs_to_pretty_str
     USING_LLM_WEB_SEARCH = True
+    print("Sử dụng LLM_Web_search thành công!")
 except ImportError as e:
-    logger.warning(f"Không thể import LLM_Web_search: {str(e)}. Sử dụng tìm kiếm web tích hợp sẵn.")
+    print(f"Chi tiết lỗi import: {str(e)}")
     USING_LLM_WEB_SEARCH = False
 
 

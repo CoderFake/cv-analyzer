@@ -2,35 +2,39 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+import logging
 
 from app.api.endpoints import router as api_router
 from app.core.config import settings
 from app.core.database import engine, Base
 
-
-if settings.USE_OLLAMA:
-    try:
-        from app.services.ollama_llm_service import ollama_llm_service as active_llm_service
-
-        print(f"Using Ollama LLM service with model {settings.OLLAMA_MODEL}")
-    except ImportError:
-        from app.services.llm_service import llm_service as active_llm_service
-
-        print(f"Ollama LLM service not available, falling back to local LLM")
-else:
-    from app.services.llm_service import llm_service as active_llm_service
-
-    print(f"Using local LLM service with model at {settings.LLM_MODEL_PATH}")
-
-llm_service = active_llm_service
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("main")
 
 try:
-    from app.utils.memory_monitor import memory_monitor
+    from app.services.ollama_llm_service import ollama_llm_service
 
-    use_memory_monitor = settings.ENABLE_MEMORY_MONITORING
+    llm_service = ollama_llm_service
+    logger.info(f"Sử dụng Ollama LLM service với mô hình {settings.OLLAMA_MODEL}")
+except ImportError:
+    from app.services.llm_service import llm_service
+
+    logger.info(f"Sử dụng dịch vụ LLM cục bộ với mô hình tại {settings.LLM_MODEL_PATH}")
+
+try:
+    if settings.ENABLE_MEMORY_MONITORING:
+        from app.utils.memory_monitor import memory_monitor
+
+        use_memory_monitor = True
+        logger.info(f"Giám sát bộ nhớ đã được bật với giới hạn: {settings.MAX_MEMORY_USAGE_MB}MB")
+    else:
+        use_memory_monitor = False
 except ImportError:
     use_memory_monitor = False
-    print("Memory monitoring not available")
+    logger.warning("Không thể sử dụng giám sát bộ nhớ")
 
 
 @asynccontextmanager
@@ -39,26 +43,27 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         if settings.DEBUG:
             await conn.run_sync(Base.metadata.create_all)
+            logger.info("Đã tạo bảng dữ liệu")
+
 
     if use_memory_monitor:
         memory_monitor.start()
-        print(f"Memory monitoring started with limit: {settings.MAX_MEMORY_USAGE_MB}MB")
+        logger.info("Đã bắt đầu giám sát bộ nhớ")
 
     yield
 
     if use_memory_monitor:
         memory_monitor.stop()
+        logger.info("Đã dừng giám sát bộ nhớ")
 
-    if settings.USE_OLLAMA:
-        try:
-            await active_llm_service.close()
-        except:
-            pass
+    if hasattr(llm_service, 'close'):
+        await llm_service.close()
+        logger.info("Đã đóng kết nối dịch vụ LLM")
 
 
 app = FastAPI(
     title="CV Analyzer API",
-    description="API for analyzing and grading CVs using LLM and web search",
+    description="API phân tích và đánh giá CV sử dụng LLM và tìm kiếm web",
     version="1.0.0",
     docs_url=settings.DOCS_URL,
     redoc_url=settings.REDOC_URL,
@@ -86,7 +91,7 @@ async def root():
     }
 
     return {
-        "message": "Welcome to CV Analyzer API",
+        "message": "Chào mừng đến với CV Analyzer API",
         "status": "OK",
         "environment": settings.ENVIRONMENT,
         "llm_service": llm_info
