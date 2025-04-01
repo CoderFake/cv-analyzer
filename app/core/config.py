@@ -33,13 +33,18 @@ class Settings(BaseSettings):
 
     # Ollama
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "kwangsuklee/gemma3-4b-it-Q8"
+    OLLAMA_MODEL: str = "gemma3"
     USE_OLLAMA: bool = True
+
+    # Gemini API
+    GEMINI_API_KEY: str = ""
+    USE_GEMINI: bool = False
 
     # Web Search
     SEARCH_RESULTS_PER_QUERY: int = 5
     SEARCH_BACKEND: str = "llm_web_search"
     SEARXNG_URL: str = ""
+    SEARXNG_LANGUAGE: str = "vi"
 
     # App
     ENVIRONMENT: str
@@ -49,16 +54,15 @@ class Settings(BaseSettings):
     OPENAPI_URL: Optional[str] = "/openapi.json"
     CORS_ORIGINS: Union[str, List[str]] = field(default_factory=lambda: ["*"])
 
-    #search
-    SEARCH_BACKEND: str = "duckduckgo"
-    SEARXNG_URL: str = ""
-    SEARXNG_LANGUAGE: str = "vi"
+    # Memory Monitoring
+    MAX_MEMORY_USAGE_MB: int = 3500
+    ENABLE_MEMORY_MONITORING: bool = False
 
-    APP_NAME: Optional[str] = None
-    APP_DESCRIPTION: Optional[str] = None
+    # App Meta
+    APP_NAME: Optional[str] = "CV Analyzer API"
+    APP_DESCRIPTION: Optional[str] = "API for analyzing and grading CVs using LLM and web search"
     APP_VERSION: Optional[str] = None
     MODEL_NAME: Optional[str] = None
-    ENABLE_MEMORY_MONITORING: Optional[bool] = False
 
     model_config = SettingsConfigDict(
         env_file=f".env.{os.getenv('ENVIRONMENT', 'dev')}",

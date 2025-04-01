@@ -1,7 +1,7 @@
 from typing import List, Optional, Dict, Any, Tuple
 from uuid import UUID
 
-from sqlalchemy import select, func, delete, and_, alias, desc, text
+from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -41,6 +41,15 @@ class ChatRepository(BaseRepository[Chat, ChatCreate, ChatUpdate]):
             content: str,
             message_metadata: Optional[Dict[str, Any]] = None
     ) -> ChatMessage:
+        if message_metadata == 'null':
+            message_metadata = None
+
+        if message_metadata is not None and not isinstance(message_metadata, dict):
+            try:
+                message_metadata = dict(message_metadata)
+            except (TypeError, ValueError):
+                message_metadata = None
+
         message = ChatMessage(
             chat_id=chat_id,
             role=role,
@@ -67,52 +76,47 @@ class ChatRepository(BaseRepository[Chat, ChatCreate, ChatUpdate]):
             self,
             user_id: UUID
     ) -> List[Tuple[Chat, Optional[ChatMessage]]]:
-
-        query = (
-            select(Chat, ChatMessage)
+        result = await self.db.execute(
+            select(
+                Chat,
+                ChatMessage
+            )
             .outerjoin(
                 ChatMessage,
-                and_(
-                    ChatMessage.chat_id == Chat.id,
-                    ChatMessage.id.in_(
-                        select(ChatMessage.id)
-                        .where(ChatMessage.chat_id == Chat.id)
-                        .order_by(ChatMessage.created_at.desc())
-                        .limit(1)
-                    )
+                ChatMessage.id.in_(
+                    select(func.max(ChatMessage.id))
+                    .where(ChatMessage.chat_id == Chat.id)
+                    .group_by(ChatMessage.chat_id)
+                    .scalar_subquery()
                 )
             )
             .where(Chat.user_id == user_id)
             .order_by(Chat.updated_at.desc())
         )
-
-        result = await self.db.execute(query)
-        return result.all()
+        return result.fetchall()
 
     async def get_chats_by_session(
             self,
             session_id: str
     ) -> List[Tuple[Chat, Optional[ChatMessage]]]:
-        query = (
-            select(Chat, ChatMessage)
+        result = await self.db.execute(
+            select(
+                Chat,
+                ChatMessage
+            )
             .outerjoin(
                 ChatMessage,
-                and_(
-                    ChatMessage.chat_id == Chat.id,
-                    ChatMessage.id.in_(
-                        select(ChatMessage.id)
-                        .where(ChatMessage.chat_id == Chat.id)
-                        .order_by(ChatMessage.created_at.desc())
-                        .limit(1)
-                    )
+                ChatMessage.id.in_(
+                    select(func.max(ChatMessage.id))
+                    .where(ChatMessage.chat_id == Chat.id)
+                    .group_by(ChatMessage.chat_id)
+                    .scalar_subquery()
                 )
             )
             .where(Chat.session_id == session_id)
             .order_by(Chat.updated_at.desc())
         )
-
-        result = await self.db.execute(query)
-        return result.all()
+        return result.fetchall()
 
     async def get_chat_history(
             self,
@@ -131,6 +135,7 @@ class ChatRepository(BaseRepository[Chat, ChatCreate, ChatUpdate]):
             self,
             chat_id: UUID
     ) -> bool:
+
         await self.db.execute(
             delete(ChatMessage)
             .where(ChatMessage.chat_id == chat_id)
