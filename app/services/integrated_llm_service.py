@@ -132,7 +132,6 @@ class IntegratedLLMService:
             Trả lời:"""
             system_prompt = self.system_prompt_vi
 
-        # Sử dụng Gemini nếu có cấu hình, hoặc fallback sang LLM service
         if self.use_gemini:
             response = await self.call_gemini_api(prompt, system_prompt)
         else:
@@ -153,27 +152,19 @@ class IntegratedLLMService:
             file_type: Optional[str] = None,
             knowledge_content: Optional[str] = None
     ) -> str:
-        """Xử lý chat với CV, file đính kèm và knowledge base"""
 
-        # Xác định ngôn ngữ
         language = self.detect_language(question)
         system_prompt = self.system_prompt_vi if language == "vi" else self.system_prompt_en
 
-        # Kiểm tra xem có file đính kèm không
         has_file = file_path is not None and os.path.exists(file_path)
 
-        # Kiểm tra xem có CV không
         has_cv = cv_content is not None and len(cv_content.strip()) > 0
 
-        # Kiểm tra xem có knowledge không
         has_knowledge = knowledge_content is not None and len(knowledge_content.strip()) > 0
 
-        # Tìm kiếm web nếu cần
         needs_web_search = context_classifier.needs_web_search(question)
 
-        # Nếu câu hỏi không liên quan đến CV hoặc không có CV
         if not self._is_cv_related(question) and not has_cv and not has_file and not has_knowledge:
-            # Trả lời mặc định
             if language == "en":
                 return "I'm sorry, I can only answer questions about CVs, recruitment, and topics in our knowledge base. If you have a CV to analyze, please upload it or ask a question related to job applications and recruitment."
             else:
@@ -249,13 +240,11 @@ class IntegratedLLMService:
         return response
 
     async def call_gemini_api(self, prompt: str, system_prompt: str) -> str:
-        """Gọi API Gemini để phân tích và trả lời"""
+
         if not GEMINI_API_KEY:
-            # Fallback sang LLM service nếu không có API key
             return await llm_service.generate_response(prompt=prompt, system_prompt=system_prompt)
 
         try:
-            # Chuẩn bị payload
             payload = {
                 "contents": [
                     {
@@ -278,7 +267,6 @@ class IntegratedLLMService:
                 }
             }
 
-            # Gọi API
             url = f"{GEMINI_API_URL}?key={GEMINI_API_KEY}"
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
@@ -287,7 +275,6 @@ class IntegratedLLMService:
                     headers={"Content-Type": "application/json"}
                 )
 
-                # Xử lý phản hồi
                 if response.status_code == 200:
                     resp_data = response.json()
                     if "candidates" in resp_data and len(resp_data["candidates"]) > 0:
@@ -299,19 +286,16 @@ class IntegratedLLMService:
                     else:
                         return "Không nhận được phản hồi hợp lệ từ API."
                 else:
-                    # Xử lý lỗi API
                     error_detail = f"Lỗi API ({response.status_code}): {response.text}"
                     print(error_detail)
-                    # Fallback sang LLM service
                     return await llm_service.generate_response(prompt=prompt, system_prompt=system_prompt)
 
         except Exception as e:
             print(f"Lỗi khi gọi Gemini API: {e}")
-            # Fallback sang LLM service
+
             return await llm_service.generate_response(prompt=prompt, system_prompt=system_prompt)
 
     def _is_cv_related(self, question: str) -> bool:
-        """Kiểm tra xem câu hỏi có liên quan đến CV và tuyển dụng không"""
         question = question.lower()
         cv_keywords = [
             'cv', 'resume', 'job', 'career', 'interview', 'skill', 'experience',

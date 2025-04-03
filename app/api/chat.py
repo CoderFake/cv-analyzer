@@ -1,5 +1,6 @@
 import os
 import tempfile
+import uuid
 from typing import Any, List, Optional
 from uuid import UUID
 
@@ -17,6 +18,7 @@ from app.services.integrated_llm_service import integrated_llm_service
 from app.services.storage_service import storage_service
 from app.utils.file_processor import FileProcessor
 from app.services.context_classifier import context_classifier
+from app.utils.cv_parser import CVParser
 
 router = APIRouter()
 
@@ -30,9 +32,7 @@ async def process_message(
         db: AsyncSession = Depends(get_db),
         user_session: dict = Depends(get_user_or_session)
 ) -> Any:
-    """
-    API thống nhất để xử lý tin nhắn và tùy chọn file đính kèm.
-    """
+
     chat_repo = ChatRepository(db)
     candidate_repo = CandidateRepository(db)
     knowledge_repo = KnowledgeRepository(db)
@@ -46,10 +46,8 @@ async def process_message(
     file_type = None
     file_name = None
 
-    # Xử lý file nếu có
     if file:
         try:
-            # Lưu file vào R2 Storage
             folder = f"chat_uploads"
             if user_session["user_id"]:
                 folder = f"{folder}/user_{user_session['user_id']}"
@@ -63,7 +61,6 @@ async def process_message(
                 folder=folder
             )
 
-            # Lưu file tạm để xử lý
             with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as temp_file:
                 file.file.seek(0)
                 content = await file.read()
@@ -71,20 +68,23 @@ async def process_message(
                 file_path_temp = temp_file.name
                 file_type = os.path.splitext(file.filename)[1]
 
-            # Trích xuất nội dung file
             try:
-                file_content = await FileProcessor.extract_text_from_file(file_path_temp)
+                file_content = await CVParser.extract_text_from_file(file_path_temp)
             except Exception as e:
                 print(f"Error extracting file content: {e}")
                 file_content = f"Không thể đọc nội dung file: {str(e)}"
+            finally:
+                try:
+                    if file_path_temp and os.path.exists(file_path_temp):
+                        os.unlink(file_path_temp)
+                except Exception as e:
+                    print(f"Error removing temp file: {e}")
         except Exception as e:
             print(f"Error processing uploaded file: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Error processing file: {str(e)}"
-            )
+            file_content = f"Không thể xử lý file: {str(e)}"
+            file_storage_path = f"placeholder://uploads/{uuid.uuid4()}-{file.filename if file.filename else 'unknown.file'}"
+            file_name = file.filename if file.filename else "unknown.file"
 
-    # Xử lý chat_id
     if chat_id and chat_id != "null" and chat_id != "undefined":
         try:
             uuid_chat_id = UUID(chat_id)
@@ -95,7 +95,6 @@ async def process_message(
                     detail="Chat not found"
                 )
 
-            # Kiểm tra quyền truy cập
             if (chat.user_id and chat.user_id != user_session["user_id"] and
                     chat.session_id != user_session["session_id"]):
                 raise HTTPException(
@@ -103,10 +102,8 @@ async def process_message(
                     detail="Access to this chat is not allowed"
                 )
         except ValueError:
-            # chat_id không phải UUID hợp lệ
             chat = None
 
-    # Xử lý candidate_id
     uuid_candidate_id = None
     if candidate_id and candidate_id != "null" and candidate_id != "undefined":
         try:
@@ -115,7 +112,6 @@ async def process_message(
         except ValueError:
             candidate = None
 
-    # Tạo chat mới nếu chưa có
     if not chat:
         chat = await chat_repo.create_chat(
             user_id=user_session["user_id"],
@@ -124,11 +120,9 @@ async def process_message(
             title=message[:30] + "..." if len(message) > 30 else message
         )
 
-    # Nếu có candidate_id nhưng chưa lấy thông tin
     if chat.candidate_id and not candidate:
         candidate = await candidate_repo.get(id=chat.candidate_id)
 
-    # Xử lý message metadata cho file nếu có
     message_metadata = None
     if file and file_storage_path:
         message_metadata = {
@@ -136,10 +130,8 @@ async def process_message(
             "file_name": file_name or file.filename
         }
 
-    # Lưu tin nhắn của người dùng
     user_message_content = message
     if file and not message.strip():
-        # Nếu không có tin nhắn kèm theo, tạo tin nhắn mặc định
         user_message_content = f"Tôi đã tải lên file: {file.filename}. Hãy phân tích file này giúp tôi."
 
     user_message = await chat_repo.add_message(
@@ -149,7 +141,6 @@ async def process_message(
         message_metadata=message_metadata
     )
 
-    # Lấy lịch sử chat
     chat_history = await chat_repo.get_chat_history(chat_id=chat.id)
     formatted_history = []
     for msg in chat_history:
@@ -158,12 +149,10 @@ async def process_message(
             "content": msg.content
         })
 
-    # Lấy nội dung CV nếu có
     cv_content = None
     if candidate:
         cv_content = candidate.cv_content
 
-    # Kiểm tra knowledge base
     if context_classifier.should_use_knowledge_base(message):
         try:
             knowledge_docs = await knowledge_repo.search_knowledge(message)
@@ -175,11 +164,9 @@ async def process_message(
             print(f"Error retrieving knowledge content: {e}")
 
     try:
-        # Xử lý phản hồi AI thông qua dịch vụ tích hợp
         assistant_reply = ""
 
         if file and file_path_temp:
-            # Xử lý tin nhắn với file
             assistant_reply = await integrated_llm_service.process_file_content(
                 file_path=file_path_temp,
                 file_content=file_content,
@@ -189,15 +176,13 @@ async def process_message(
                 knowledge_content=knowledge_content
             )
         else:
-            # Xử lý tin nhắn thông thường
             assistant_reply = await integrated_llm_service.chat_with_knowledge(
                 question=message,
-                chat_history=formatted_history[:-1],  # Bỏ tin nhắn hiện tại của người dùng
+                chat_history=formatted_history[:-1],
                 cv_content=cv_content,
                 knowledge_content=knowledge_content
             )
 
-        # Lưu phản hồi của assistant
         assistant_message = await chat_repo.add_message(
             chat_id=chat.id,
             role="assistant",
@@ -216,11 +201,9 @@ async def process_message(
         )
 
     except Exception as e:
-        # Xử lý lỗi
         error_message = f"Xin lỗi, đã xảy ra lỗi khi xử lý yêu cầu: {str(e)}"
         print(f"Error processing message: {e}")
 
-        # Lưu tin nhắn lỗi
         error_assistant_message = await chat_repo.add_message(
             chat_id=chat.id,
             role="assistant",
@@ -239,7 +222,6 @@ async def process_message(
             )
         )
     finally:
-        # Đảm bảo xóa file tạm
         if file_path_temp and os.path.exists(file_path_temp):
             try:
                 os.unlink(file_path_temp)
@@ -253,10 +235,7 @@ async def send_message(
         db: AsyncSession = Depends(get_db),
         user_session: dict = Depends(get_user_or_session)
 ) -> Any:
-    """
-    [Legacy] Gửi tin nhắn văn bản đến chat
-    """
-    # Chuyển hướng đến API mới
+
     return await process_message(
         message=chat_request.message,
         chat_id=str(chat_request.chat_id) if chat_request.chat_id else None,
@@ -276,10 +255,7 @@ async def send_file_message(
         db: AsyncSession = Depends(get_db),
         user_session: dict = Depends(get_user_or_session)
 ) -> Any:
-    """
-    [Legacy] Gửi file và tin nhắn đến chat
-    """
-    # Chuyển hướng đến API mới
+
     return await process_message(
         message=message,
         chat_id=chat_id,
@@ -295,32 +271,43 @@ async def list_chats(
         db: AsyncSession = Depends(get_db),
         user_session: dict = Depends(get_user_or_session)
 ) -> Any:
-    """Lấy danh sách chat"""
     chat_repo = ChatRepository(db)
 
     chat_data = []
 
-    if user_session["user_id"]:
-        chats = await chat_repo.get_chats_by_user(user_id=user_session["user_id"])
-    else:
-        chats = await chat_repo.get_chats_by_session(session_id=user_session["session_id"])
-
-    for chat_tuple in chats:
-        chat, last_message = chat_tuple
-        chat_dict = Chat.model_validate(chat).model_dump()
-        if last_message:
-            chat_dict["last_message"] = ChatMessage.model_validate(last_message)
-            chat_dict["message_count"] = 1
+    try:
+        if user_session["user_id"]:
+            chats = await chat_repo.get_chats_by_user(user_id=user_session["user_id"])
         else:
-            chat_dict["message_count"] = 0
+            chats = await chat_repo.get_chats_by_session(session_id=user_session["session_id"])
 
-        chat_data.append(ChatSummary(**chat_dict))
+        for chat, last_message in chats:
+            chat_dict = {
+                "id": chat.id,
+                "title": chat.title,
+                "user_id": chat.user_id,
+                "session_id": chat.session_id,
+                "candidate_id": chat.candidate_id,
+                "created_at": chat.created_at,
+                "updated_at": chat.updated_at,
+                "message_count": 1 if last_message else 0
+            }
 
-    return ResponseBase(
-        success=True,
-        data=chat_data
-    )
+            if last_message:
+                chat_dict["last_message"] = ChatMessage.model_validate(last_message)
 
+            chat_data.append(ChatSummary(**chat_dict))
+
+        return ResponseBase(
+            success=True,
+            data=chat_data
+        )
+    except Exception as e:
+        print(f"Error in list_chats: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error getting chat list: {str(e)}"
+        )
 
 @router.get("/{chat_id}", response_model=ResponseBase[Chat])
 async def get_chat(

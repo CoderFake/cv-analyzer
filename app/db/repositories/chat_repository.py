@@ -76,47 +76,31 @@ class ChatRepository(BaseRepository[Chat, ChatCreate, ChatUpdate]):
             self,
             user_id: UUID
     ) -> List[Tuple[Chat, Optional[ChatMessage]]]:
-        result = await self.db.execute(
-            select(
-                Chat,
-                ChatMessage
-            )
-            .outerjoin(
-                ChatMessage,
-                ChatMessage.id.in_(
-                    select(func.max(ChatMessage.id))
-                    .where(ChatMessage.chat_id == Chat.id)
-                    .group_by(ChatMessage.chat_id)
-                    .scalar_subquery()
-                )
-            )
+        chat_query = (
+            select(Chat)
             .where(Chat.user_id == user_id)
             .order_by(Chat.updated_at.desc())
         )
-        return result.fetchall()
 
-    async def get_chats_by_session(
-            self,
-            session_id: str
-    ) -> List[Tuple[Chat, Optional[ChatMessage]]]:
-        result = await self.db.execute(
-            select(
-                Chat,
-                ChatMessage
+        chat_result = await self.db.execute(chat_query)
+        chats = chat_result.scalars().all()
+
+        result = []
+
+        for chat in chats:
+            message_query = (
+                select(ChatMessage)
+                .where(ChatMessage.chat_id == chat.id)
+                .order_by(ChatMessage.created_at.desc())
+                .limit(1)
             )
-            .outerjoin(
-                ChatMessage,
-                ChatMessage.id.in_(
-                    select(func.max(ChatMessage.id))
-                    .where(ChatMessage.chat_id == Chat.id)
-                    .group_by(ChatMessage.chat_id)
-                    .scalar_subquery()
-                )
-            )
-            .where(Chat.session_id == session_id)
-            .order_by(Chat.updated_at.desc())
-        )
-        return result.fetchall()
+
+            message_result = await self.db.execute(message_query)
+            last_message = message_result.scalars().first()
+
+            result.append((chat, last_message))
+
+        return result
 
     async def get_chat_history(
             self,
@@ -130,6 +114,35 @@ class ChatRepository(BaseRepository[Chat, ChatCreate, ChatUpdate]):
             .limit(limit)
         )
         return result.scalars().all()
+
+    async def get_chats_by_session(
+            self,
+            session_id: str
+    ) -> List[Tuple[Chat, Optional[ChatMessage]]]:
+        chat_query = (
+            select(Chat)
+            .where(Chat.session_id == session_id)
+            .order_by(Chat.updated_at.desc())
+        )
+
+        chat_result = await self.db.execute(chat_query)
+        chats = chat_result.scalars().all()
+
+        result = []
+        for chat in chats:
+            message_query = (
+                select(ChatMessage)
+                .where(ChatMessage.chat_id == chat.id)
+                .order_by(ChatMessage.created_at.desc())
+                .limit(1)
+            )
+
+            message_result = await self.db.execute(message_query)
+            last_message = message_result.scalars().first()
+
+            result.append((chat, last_message))
+
+        return result
 
     async def delete_chat_with_messages(
             self,

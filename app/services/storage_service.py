@@ -31,24 +31,59 @@ class StorageService:
         file_uuid = uuid.uuid4()
         file_key = f"{folder}/{file_uuid}-{filename}"
 
-        extra_args = {}
-        if content_type:
-            extra_args["ContentType"] = content_type
-
         try:
-            self.client.upload_fileobj(
-                file,
-                self.bucket_name,
-                file_key,
-                ExtraArgs=extra_args
-            )
+            extra_args = {}
+            if content_type:
+                extra_args["ContentType"] = content_type
 
-            file_url = f"{settings.R2_PUBLIC_ENDPOINT}/{self.bucket_name}/{file_key}"
-            return file_url, filename
+            try:
+                self.client.upload_fileobj(
+                    file,
+                    self.bucket_name,
+                    file_key,
+                    ExtraArgs=extra_args
+                )
 
-        except ClientError as e:
-            print(f"Error uploading file to R2: {e}")
-            raise
+                file_url = f"{settings.R2_PUBLIC_ENDPOINT}/{self.bucket_name}/{file_key}"
+                return file_url, filename
+
+            except ClientError as e:
+                print(f"Error uploading file to R2: {e}")
+
+                local_dir = f"/tmp/{folder}"
+                os.makedirs(local_dir, exist_ok=True)
+
+                local_path = f"{local_dir}/{file_uuid}-{filename}"
+
+                file.seek(0)
+
+                data = file.read()
+
+                with open(local_path, 'wb') as f:
+                    f.write(data)
+
+                print(f"Saved file locally at: {local_path}")
+                return f"local://{local_path}", filename
+
+        except Exception as e:
+            print(f"Error in upload_file: {e}")
+
+            try:
+                local_dir = f"/tmp/{folder}"
+                os.makedirs(local_dir, exist_ok=True)
+
+                local_path = f"{local_dir}/{file_uuid}-{filename}"
+
+                file.seek(0)
+
+                with open(local_path, 'wb') as f:
+                    f.write(file.read())
+
+                print(f"Fallback: Saved file locally at: {local_path}")
+                return f"local://{local_path}", filename
+            except Exception as inner_e:
+                print(f"Failed even local fallback: {inner_e}")
+                return f"placeholder://{folder}/{file_uuid}-{filename}", filename
 
     async def delete_file(self, file_key: str) -> bool:
         try:
@@ -67,6 +102,9 @@ class StorageService:
             expiration: int = 3600
     ) -> Optional[str]:
         try:
+            if file_key.startswith("local://") or file_key.startswith("placeholder://"):
+                return file_key
+
             response = self.client.generate_presigned_url(
                 'get_object',
                 Params={
@@ -76,7 +114,7 @@ class StorageService:
                 ExpiresIn=expiration
             )
             return response
-        except ClientError as e:
+        except Exception as e:
             print(f"Error generating presigned URL: {e}")
             return None
 
