@@ -32,7 +32,6 @@ async def process_message(
         db: AsyncSession = Depends(get_db),
         user_session: dict = Depends(get_user_or_session)
 ) -> Any:
-
     chat_repo = ChatRepository(db)
     candidate_repo = CandidateRepository(db)
     knowledge_repo = KnowledgeRepository(db)
@@ -48,6 +47,7 @@ async def process_message(
 
     if file:
         try:
+            print(f"===== XỬ LÝ FILE TRONG API: {file.filename} =====")
             folder = f"chat_uploads"
             if user_session["user_id"]:
                 folder = f"{folder}/user_{user_session['user_id']}"
@@ -60,25 +60,29 @@ async def process_message(
                 content_type=file.content_type,
                 folder=folder
             )
+            print(f"Upload file thành công: {file_storage_path}")
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as temp_file:
+            # Lưu file tạm vào hệ thống để xử lý
+            file_extension = os.path.splitext(file.filename)[1].lower()
+            print(f"File extension: {file_extension}")
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
+                # Đặt con trỏ file về đầu
                 file.file.seek(0)
                 content = await file.read()
                 temp_file.write(content)
                 file_path_temp = temp_file.name
-                file_type = os.path.splitext(file.filename)[1]
+                file_type = file_extension
+                print(f"Đã lưu file tạm: {file_path_temp}, kích thước: {len(content)} bytes")
 
             try:
                 file_content = await CVParser.extract_text_from_file(file_path_temp)
+                print(f"Trích xuất nội dung từ file thành công, độ dài: {len(file_content)} ký tự")
+                print(f"Nội dung trích xuất (200 ký tự đầu): {file_content[:200]}...")
             except Exception as e:
                 print(f"Error extracting file content: {e}")
                 file_content = f"Không thể đọc nội dung file: {str(e)}"
-            finally:
-                try:
-                    if file_path_temp and os.path.exists(file_path_temp):
-                        os.unlink(file_path_temp)
-                except Exception as e:
-                    print(f"Error removing temp file: {e}")
+
         except Exception as e:
             print(f"Error processing uploaded file: {e}")
             file_content = f"Không thể xử lý file: {str(e)}"
@@ -132,7 +136,7 @@ async def process_message(
 
     user_message_content = message
     if file and not message.strip():
-        user_message_content = f"Tôi đã tải lên file: {file.filename}. Hãy phân tích file này giúp tôi."
+        user_message_content = f"Tôi đã tải lên file: {file.filename}. Hãy giúp tôi phân tích file cv này."
 
     user_message = await chat_repo.add_message(
         chat_id=chat.id,
@@ -166,16 +170,20 @@ async def process_message(
     try:
         assistant_reply = ""
 
-        if file and file_path_temp:
-            assistant_reply = await integrated_llm_service.process_file_content(
-                file_path=file_path_temp,
-                file_content=file_content,
-                file_type=file_type,
-                query=message,
+        if file_path_temp and os.path.exists(file_path_temp):
+            print(f"===== GỌI INTEGRATED_LLM_SERVICE.CHAT_WITH_KNOWLEDGE VỚI FILE: {file_path_temp} =====")
+            print(f"file_type: {file_type}, file_content length: {len(file_content or '')}")
+
+            assistant_reply = await integrated_llm_service.chat_with_knowledge(
+                question=message,
+                chat_history=formatted_history[:-1],
                 cv_content=cv_content,
+                file_path=file_path_temp,
+                file_type=file_type,
                 knowledge_content=knowledge_content
             )
         else:
+            print("===== GỌI INTEGRATED_LLM_SERVICE.CHAT_WITH_KNOWLEDGE KHÔNG CÓ FILE =====")
             assistant_reply = await integrated_llm_service.chat_with_knowledge(
                 question=message,
                 chat_history=formatted_history[:-1],
@@ -224,6 +232,7 @@ async def process_message(
     finally:
         if file_path_temp and os.path.exists(file_path_temp):
             try:
+                print(f"Dọn dẹp file tạm: {file_path_temp}")
                 os.unlink(file_path_temp)
             except Exception as e:
                 print(f"Error removing temp file: {e}")
