@@ -1,20 +1,19 @@
 import os
 import re
 import json
+import base64
 import asyncio
 import tempfile
-import base64
 import logging
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Set
 from uuid import UUID
 
 import httpx
-import requests
 from langdetect import detect, LangDetectException
 from bs4 import BeautifulSoup
 from duckduckgo_search import DDGS
+from app.core.config import settings
 
-# Cấu hình logging
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("cv-analysis-service")
@@ -22,69 +21,104 @@ logger = logging.getLogger("cv-analysis-service")
 
 class AdvancedCVAnalysisService:
     """
-    Dịch vụ phân tích CV nâng cao sử dụng Ollama Vision, LlamaIndex và tìm kiếm Web
-    để cung cấp phân tích chi tiết về CV và tính phù hợp với thị trường
+    Advanced CV analysis service using Ollama for CV processing and analysis,
+    DuckDuckGo for market research, and Gemini for final user-facing responses
     """
 
     def __init__(self):
+
         self.client = httpx.AsyncClient(timeout=60.0)
-        self.ollama_base_url = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434")
-        self.ollama_model = os.environ.get("OLLAMA_MODEL", "llama3")
-        self.gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
+
+        self.ollama_base_url = settings.OLLAMA_BASE_URL
+        self.ollama_model = settings.OLLAMA_MODEL
+        self.gemini_api_key = settings.GEMINI_API_KEY
         self.gemini_api_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent"
 
-        # System prompts cho các bước phân tích
+        self.debug_mode = os.environ.get("DEBUG", "false").lower() == "true"
+
         self.system_prompts = {
-            "cv_extraction": """Bạn là trợ lý AI chuyên về phân tích CV. Nhiệm vụ của bạn là trích xuất tất cả thông tin quan trọng từ CV, bao gồm:
-                - Thông tin cá nhân: tên, email, số điện thoại, địa chỉ
-                - Học vấn: trường, bằng cấp, chuyên ngành, thời gian học
-                - Kinh nghiệm làm việc: công ty, vị trí, thời gian, trách nhiệm, thành tựu
-                - Kỹ năng: kỹ năng chuyên môn, kỹ năng mềm, ngôn ngữ
-                - Chứng chỉ và các khóa học
-                - Các dự án đã tham gia
-                - Sở thích và hoạt động ngoại khóa
-            Trả về dưới dạng cấu trúc rõ ràng với các mục riêng biệt.""",
+            "cv_extraction": """You are an AI assistant specializing in CV analysis. Your task is to extract all important information from CVs, including:
+                - Personal information: name, email, phone, address
+                - Education: schools, degrees, fields of study, time periods
+                - Work experience: companies, positions, time periods, responsibilities, achievements
+                - Skills: technical skills, soft skills, languages
+                - Certifications and courses
+                - Projects participated in
+                - Interests and extracurricular activities
+            Return in a clear structured format with separate sections.""",
 
-            "position_analysis": """Bạn là chuyên gia tuyển dụng. Nhiệm vụ của bạn là phân tích yêu cầu cho vị trí ứng tuyển dựa trên thông tin thị trường.
-            Hãy xác định:
-                - Yêu cầu kỹ năng chính
-                - Yêu cầu kinh nghiệm
-                - Yêu cầu bằng cấp
-                - Mức lương phổ biến trên thị trường
-                - Các công nghệ/kỹ năng đang được ưa chuộng
-                - Xu hướng tuyển dụng hiện tại""",
+            "market_analysis": """You are a recruitment expert. Your task is to analyze the requirements for the applied position based on market information.
+            Identify:
+                - Key skill requirements
+                - Experience requirements
+                - Education requirements
+                - Common salary range
+                - Popular technologies/skills
+                - Current recruitment trends""",
 
-            "cv_evaluation": """Bạn là nhà tuyển dụng chuyên nghiệp. Nhiệm vụ của bạn là đánh giá CV và đưa ra nhận xét khách quan về:
-                - Tính phù hợp với vị trí ứng tuyển
-                - Điểm mạnh và điểm yếu của ứng viên
-                - Mức độ cạnh tranh so với thị trường
-                - Khả năng đáp ứng yêu cầu công việc
-                - Gợi ý cải thiện CV
-            Đánh giá theo thang điểm A-E, trong đó A là xuất sắc và E là không đạt yêu cầu."""
+            "cv_evaluation": """You are a professional recruiter. Your task is to evaluate the CV and provide objective feedback on:
+                - Suitability for the applied position
+                - Candidate's strengths and weaknesses
+                - Competitiveness in the market
+                - Ability to meet job requirements
+                - Suggestions for CV improvement
+            Evaluate on an A-E scale, where A is excellent and E is unsatisfactory."""
         }
 
+        try:
+
+            from app.lib.llm_web_search.retrieval import DocumentRetriever
+            from app.lib.llm_web_search.utils import Document, MySentenceTransformer
+            import torch
+
+            logger.info("Initializing LlamaIndex components")
+            self.llamaindex_available = True
+
+            self.embedding_model = MySentenceTransformer(
+                "all-MiniLM-L6-v2",
+                device="cpu",
+                model_kwargs={"torch_dtype": torch.float32}
+            )
+
+            self.document_retriever = DocumentRetriever(
+                device="cpu",
+                num_results=5,
+                similarity_threshold=0.5,
+                chunk_size=500,
+                keyword_retriever="bm25"
+            )
+
+            self.Document = Document
+            logger.info("LlamaIndex components initialized successfully")
+
+        except Exception as e:
+            logger.warning(f"LlamaIndex components not available: {e}")
+            self.llamaindex_available = False
+            self.embedding_model = None
+            self.document_retriever = None
+            self.Document = None
+
     def detect_language(self, text: str) -> str:
-        """Xác định ngôn ngữ của văn bản"""
+        """Detect the language of a text (returns 'en' or 'vi')"""
         try:
             lang = detect(text)
             return "en" if lang == "en" else "vi"
         except LangDetectException:
-            return "vi"  # Mặc định tiếng Việt
+
+            return "vi"
 
     async def extract_content_from_image(self, file_path: str) -> str:
-        """Sử dụng Ollama Vision API để trích xuất thông tin từ hình ảnh CV"""
+        """Extract text from CV images using Ollama Vision API"""
         try:
             logger.info(f"Extracting content from image: {file_path}")
 
-            # Đọc tệp ảnh và chuyển thành base64
             with open(file_path, "rb") as image_file:
                 file_data = image_file.read()
                 file_size = len(file_data)
                 logger.info(f"File size: {file_size} bytes")
                 base64_image = base64.b64encode(file_data).decode("utf-8")
 
-            # Chuẩn bị prompt để trích xuất CV
-            prompt_message = "Hãy trích xuất tất cả thông tin từ CV này thành văn bản có cấu trúc, bao gồm: thông tin cá nhân, học vấn, kinh nghiệm làm việc, kỹ năng, chứng chỉ và các thông tin liên quan khác."
+            prompt_message = "Extract all information from this CV into structured text, including: personal information, education, work experience, skills, certifications and other relevant information."
 
             payload = {
                 "model": self.ollama_model,
@@ -93,7 +127,6 @@ class AdvancedCVAnalysisService:
                 "stream": False
             }
 
-            # Gọi API Ollama
             url = f"{self.ollama_base_url}/api/generate"
             logger.info(f"Calling Ollama Vision API at {url}")
 
@@ -103,12 +136,15 @@ class AdvancedCVAnalysisService:
 
             content = result.get("response", "")
             logger.info(f"Extracted content length: {len(content)} characters")
+
+            if len(content) < 50:
+                logger.warning("Extracted content too short, might indicate a failure")
+
             return content
 
         except Exception as e:
             logger.error(f"Error extracting content from image: {e}")
 
-            # Thử phương án dự phòng
             try:
                 from PIL import Image
                 import pytesseract
@@ -126,24 +162,21 @@ class AdvancedCVAnalysisService:
             return f"Error extracting content from image: {e}"
 
     async def extract_text_from_document(self, file_path: str, file_type: str) -> str:
-        """Trích xuất văn bản từ tệp tài liệu (PDF, DOCX, TXT, ...)"""
+        """Extract text from document files (PDF, DOCX, TXT, etc.)"""
         try:
             logger.info(f"Extracting text from document: {file_path} (type: {file_type})")
 
-            # Kiểm tra tệp có tồn tại không
             if not os.path.exists(file_path):
                 raise FileNotFoundError(f"File not found: {file_path}")
 
-            # Xử lý theo loại tệp
             if file_type.lower() in ['.jpg', '.jpeg', '.png']:
-                # Sử dụng Ollama Vision cho hình ảnh
+
                 return await self.extract_content_from_image(file_path)
 
             elif file_type.lower() == '.pdf':
-                # Xử lý PDF
+
                 try:
                     import PyPDF2
-
                     with open(file_path, 'rb') as file:
                         reader = PyPDF2.PdfReader(file)
                         text = ""
@@ -154,10 +187,10 @@ class AdvancedCVAnalysisService:
                         return text
                 except Exception as pdf_error:
                     logger.error(f"Error extracting PDF: {pdf_error}")
-                    # Thử phương pháp khác nếu PyPDF2 thất bại
+
 
             elif file_type.lower() in ['.doc', '.docx']:
-                # Xử lý Word documents
+
                 try:
                     import textract
                     text = textract.process(file_path).decode('utf-8', errors='ignore')
@@ -167,13 +200,12 @@ class AdvancedCVAnalysisService:
                     logger.error(f"Error extracting DOC/DOCX: {doc_error}")
 
             elif file_type.lower() == '.txt':
-                # Xử lý file text đơn giản
+
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
                     text = file.read()
                     logger.info(f"Extracted {len(text)} characters from TXT")
                     return text
 
-            # Thử sử dụng unstructured nếu các phương pháp trên thất bại
             try:
                 from unstructured.partition.auto import partition
                 elements = partition(filename=file_path)
@@ -183,9 +215,7 @@ class AdvancedCVAnalysisService:
             except Exception as unstruct_error:
                 logger.error(f"Error using unstructured: {unstruct_error}")
 
-            # Nếu tất cả phương pháp thất bại, thử đọc dưới dạng văn bản thô
             try:
-                # Thử các encoding khác nhau
                 for encoding in ['utf-8', 'latin1', 'cp1252']:
                     try:
                         with open(file_path, 'r', encoding=encoding, errors='ignore') as file:
@@ -203,22 +233,20 @@ class AdvancedCVAnalysisService:
             logger.error(f"Error in extract_text_from_document: {e}")
             return f"Error extracting document: {str(e)}"
 
-    async def analyze_cv_content(self, cv_content: str, prompt_type: str = "cv_extraction") -> str:
-        """Phân tích nội dung CV và trích xuất thông tin có cấu trúc"""
+    async def analyze_cv_with_ollama(self, cv_content: str, prompt_type: str = "cv_extraction") -> str:
+        """Analyze CV content using Ollama and extract structured information"""
         try:
-            logger.info(f"Analyzing CV content with prompt type: {prompt_type}")
+            logger.info(f"Analyzing CV content with Ollama using prompt type: {prompt_type}")
 
             system_prompt = self.system_prompts.get(prompt_type, self.system_prompts["cv_extraction"])
 
-            # Sử dụng Ollama để phân tích CV
-            url = f"{self.ollama_base_url}/api/chat"
+            url = f"{self.ollama_base_url}/api/generate"
+
+            combined_prompt = f"{system_prompt}\n\n{cv_content}"
 
             payload = {
                 "model": self.ollama_model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": cv_content}
-                ],
+                "prompt": combined_prompt,
                 "stream": False
             }
 
@@ -226,47 +254,44 @@ class AdvancedCVAnalysisService:
             response.raise_for_status()
             result = response.json()
 
-            analysis = result.get("message", {}).get("content", "")
+            analysis = result.get("response", "")
             logger.info(f"CV analysis complete, {len(analysis)} characters")
 
             return analysis
 
         except Exception as e:
-            logger.error(f"Error analyzing CV content: {e}")
+            logger.error(f"Error analyzing CV content with Ollama: {e}")
             return f"Error analyzing CV: {str(e)}"
 
     async def search_job_market(self, position: str, skills: List[str] = None) -> List[Dict[str, str]]:
-        """Tìm kiếm thông tin thị trường việc làm sử dụng DuckDuckGo"""
+        """Search job market information using DuckDuckGo"""
         try:
             logger.info(f"Searching job market for position: {position}")
             results = []
 
-            # Tạo queries tìm kiếm
             search_queries = [
-                f"yêu cầu tuyển dụng vị trí {position}",
-                f"kỹ năng cần thiết cho {position}",
-                f"mức lương {position} tại Việt Nam",
-                f"xu hướng tuyển dụng {position} 2025"
+                f"job requirements for {position} position",
+                f"skills needed for {position}",
+                f"{position} salary in Vietnam",
+                f"{position} recruitment trends 2025",
+                f"{position} top skills market demand"
             ]
 
             if skills and len(skills) > 0:
-                # Thêm tìm kiếm với 3 kỹ năng hàng đầu
                 top_skills = skills[:3]
                 for skill in top_skills:
-                    search_queries.append(f"{position} với kỹ năng {skill}")
+                    search_queries.append(f"{position} with {skill} skill requirements")
 
-            # Thực hiện tìm kiếm song song
             search_tasks = []
             for query in search_queries:
                 search_tasks.append(self._perform_duckduckgo_search(query))
 
             search_results = await asyncio.gather(*search_tasks)
 
-            # Gộp kết quả
             for query_results in search_results:
                 results.extend(query_results)
 
-            logger.info(f"Found {len(results)} search results")
+            logger.info(f"Found {len(results)} search results for job market")
             return results
 
         except Exception as e:
@@ -274,7 +299,7 @@ class AdvancedCVAnalysisService:
             return []
 
     async def _perform_duckduckgo_search(self, query: str, max_results: int = 3) -> List[Dict[str, str]]:
-        """Thực hiện tìm kiếm DuckDuckGo và trả về kết quả"""
+        """Perform DuckDuckGo search and return results"""
         try:
             logger.info(f"Performing DuckDuckGo search for: {query}")
             results = []
@@ -286,19 +311,21 @@ class AdvancedCVAnalysisService:
                         safesearch='moderate',
                         max_results=max_results
                 ):
-                    # Trích xuất nội dung từ URL
+
                     try:
+
                         content = result.get("body", "")
-                        # Nếu muốn lấy thêm nội dung từ trang web
-                        # extended_content = await self._get_webpage_content(result.get("href", ""))
-                        # if extended_content:
-                        #     content = extended_content
+
+
+
+
 
                         results.append({
                             "title": result.get("title", ""),
                             "content": content,
                             "url": result.get("href", "")
                         })
+
                     except Exception as ex:
                         logger.error(f"Error processing search result: {ex}")
 
@@ -309,7 +336,7 @@ class AdvancedCVAnalysisService:
             return []
 
     async def _get_webpage_content(self, url: str) -> str:
-        """Lấy và xử lý nội dung trang web"""
+        """Get and process webpage content"""
         try:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
@@ -322,18 +349,18 @@ class AdvancedCVAnalysisService:
                 response.raise_for_status()
 
                 soup = BeautifulSoup(response.text, 'html.parser')
-                # Loại bỏ script, style, header, footer...
+
                 for element in soup(['script', 'style', 'header', 'footer', 'nav']):
                     element.decompose()
 
-                # Lấy nội dung văn bản
                 paragraphs = []
                 for p in soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'li']):
                     text = p.get_text(strip=True)
-                    if text and len(text) > 20:  # Chỉ lấy đoạn có nghĩa
+                    if text and len(text) > 20:  # Only include meaningful paragraphs
                         paragraphs.append(text)
 
                 content = "\n\n".join(paragraphs)
+
                 if len(content) > 1500:
                     content = content[:1500] + "..."
 
@@ -344,25 +371,25 @@ class AdvancedCVAnalysisService:
             return ""
 
     async def extract_skills_from_analysis(self, cv_analysis: str) -> List[str]:
-        """Trích xuất danh sách kỹ năng từ phân tích CV"""
+        """Extract skills list from CV analysis"""
         try:
-            # Tìm kiếm phần kỹ năng trong phân tích CV
-            skills_section = re.search(r"(?:Kỹ năng|Skills)[:\s]+(.*?)(?=\n\s*\n|$)", cv_analysis,
-                                       re.IGNORECASE | re.DOTALL)
+
+            skills_section = re.search(r"(?:Skills|Kỹ năng)[:\s]+(.*?)(?=\n\s*\n|\n#|\n##|$)",
+                                       cv_analysis, re.IGNORECASE | re.DOTALL)
+
             if skills_section:
                 skills_text = skills_section.group(1)
-                # Tách các kỹ năng theo dấu phẩy, dấu chấm, hoặc xuống dòng
+
                 skills_list = re.split(r"[,.:;•\n]+", skills_text)
-                # Làm sạch và lọc
+
                 skills = [skill.strip() for skill in skills_list if skill.strip()]
                 return skills
 
-            # Nếu không tìm thấy phần kỹ năng rõ ràng, sử dụng Ollama để trích xuất
             prompt = f"""
-            Từ phân tích CV sau, hãy trích xuất danh sách các kỹ năng (cả kỹ năng kỹ thuật và kỹ năng mềm).
-            Trả về dưới dạng danh sách với mỗi kỹ năng trên một dòng, không có thêm thông tin khác.
+            From the following CV analysis, extract a list of skills (both technical and soft skills).
+            Return as a list with one skill per line, no additional information.
 
-            CV:
+            CV Analysis:
             {cv_analysis}
             """
 
@@ -388,20 +415,26 @@ class AdvancedCVAnalysisService:
             return []
 
     async def extract_position_from_cv(self, cv_content: str) -> str:
-        """Trích xuất vị trí ứng tuyển từ nội dung CV"""
+        """Extract job position from CV content"""
         try:
-            # Tìm kiếm vị trí trong CV
-            position_match = re.search(r"(?:vị trí|position|job title)[:\s]*([^\n.,]+)", cv_content, re.IGNORECASE)
-            if position_match:
-                return position_match.group(1).strip()
 
-            # Nếu không tìm thấy, sử dụng Ollama để trích xuất
+            position_patterns = [
+                r"(?:vị trí|position|job title|applying for)[:\s]*([^\n.,]+)",
+                r"(?:career objective|objective)[:\s]*.*?([^\n.,]{3,30})\s*(?:position|role|job)",
+                r"(?:desired position|desired role)[:\s]*([^\n.,]+)"
+            ]
+
+            for pattern in position_patterns:
+                position_match = re.search(pattern, cv_content, re.IGNORECASE)
+                if position_match:
+                    return position_match.group(1).strip()
+
             prompt = f"""
-            Từ CV sau, hãy xác định vị trí mà ứng viên đang ứng tuyển hoặc nghề nghiệp chính.
-            Chỉ trả về tên vị trí/nghề nghiệp, không thêm thông tin khác.
+            From the following CV, identify the position that the candidate is applying for or their main profession.
+            Return only the position/profession name, no additional information.
 
             CV:
-            {cv_content[:2000]}  # Giới hạn độ dài CV để xử lý nhanh hơn
+            {cv_content[:2000]}  # Limit CV length for faster processing
             """
 
             url = f"{self.ollama_base_url}/api/generate"
@@ -422,33 +455,28 @@ class AdvancedCVAnalysisService:
             logger.error(f"Error extracting position: {e}")
             return ""
 
-    async def generate_comprehensive_analysis(
+    async def generate_final_analysis_with_gemini(
             self,
             cv_content: str,
             position: str,
             market_data: List[Dict[str, str]],
+            cv_analysis: str,
+            skills: List[str],
             chat_history: List[Dict[str, str]] = None
     ) -> str:
-        """Tạo phân tích toàn diện về CV sử dụng Gemini API"""
+        """Generate comprehensive CV analysis using Gemini API for final user-facing response"""
         try:
-            logger.info(f"Generating comprehensive analysis for position: {position}")
+            logger.info(f"Generating final analysis with Gemini for position: {position}")
 
-            # Phân tích CV
-            cv_analysis = await self.analyze_cv_content(cv_content)
-
-            # Trích xuất kỹ năng
-            skills = await self.extract_skills_from_analysis(cv_analysis)
             skills_text = "\n".join([f"- {skill}" for skill in skills])
 
-            # Chuẩn bị dữ liệu thị trường
             market_info = ""
             for i, data in enumerate(market_data, 1):
-                market_info += f"Thông tin thị trường {i}:\n"
-                market_info += f"Tiêu đề: {data.get('title', '')}\n"
-                market_info += f"Nội dung: {data.get('content', '')[:500]}...\n"
-                market_info += f"Nguồn: {data.get('url', '')}\n\n"
+                market_info += f"Market Info {i}:\n"
+                market_info += f"Title: {data.get('title', '')}\n"
+                market_info += f"Content: {data.get('content', '')[:500]}...\n"
+                market_info += f"Source: {data.get('url', '')}\n\n"
 
-            # Chuẩn bị lịch sử chat
             chat_history_text = ""
             if chat_history:
                 for msg in chat_history:
@@ -456,15 +484,13 @@ class AdvancedCVAnalysisService:
                     content = msg.get("content", "")
                     chat_history_text += f"{role.capitalize()}: {content}\n"
 
-            # Phát hiện ngôn ngữ
             language = self.detect_language(cv_content)
 
-            # Chuẩn bị prompt cho Gemini
             if language == "en":
                 prompt = f"""
                 I need a comprehensive analysis of this CV/resume for a {position} position.
 
-                CV ANALYSIS:
+                CV ANALYSIS (from Ollama):
                 {cv_analysis}
 
                 SKILLS IDENTIFIED:
@@ -481,12 +507,13 @@ class AdvancedCVAnalysisService:
                 5. Suggestions for improvement
 
                 Base your analysis on the CV content and market research provided.
+                Make your response conversational and helpful, as this will be shown directly to the user.
                 """
             else:
                 prompt = f"""
                 Tôi cần một bản phân tích toàn diện về CV này cho vị trí {position}.
 
-                PHÂN TÍCH CV:
+                PHÂN TÍCH CV (từ Ollama):
                 {cv_analysis}
 
                 KỸ NĂNG XÁC ĐỊNH:
@@ -503,29 +530,42 @@ class AdvancedCVAnalysisService:
                 5. Đề xuất cải thiện
 
                 Dựa phân tích của bạn trên nội dung CV và nghiên cứu thị trường được cung cấp.
+                Hãy làm cho câu trả lời mang tính trò chuyện và hữu ích, vì nó sẽ được hiển thị trực tiếp cho người dùng.
                 """
 
-            # Gọi Gemini API
-            if self.gemini_api_key:
-                logger.info("Using Gemini API for comprehensive analysis")
-                analysis = await self._call_gemini_api(prompt)
-            else:
-                logger.info("Using Ollama for comprehensive analysis")
+            logger.info("Calling Gemini API for final analysis")
+            analysis = await self._call_gemini_api(prompt)
+
+            if not analysis or len(analysis) < 100:
+                logger.warning(f"Gemini analysis too short or empty: '{analysis}'")
+
+                logger.info("Falling back to Ollama for final analysis")
                 analysis = await self._call_ollama_chat(prompt)
 
             return analysis
 
         except Exception as e:
-            logger.error(f"Error generating comprehensive analysis: {e}")
-            return f"Error generating analysis: {str(e)}"
+            logger.error(f"Error generating final analysis with Gemini: {e}")
+
+            logger.info("Falling back to Ollama due to Gemini error")
+            try:
+                return await self._call_ollama_chat(prompt)
+            except:
+                return f"Error generating CV analysis: {str(e)}"
 
     async def _call_gemini_api(self, prompt: str) -> str:
-        """Gọi Gemini API để xử lý yêu cầu"""
+        """Call Gemini API to process request"""
         try:
+
+            if not self.gemini_api_key:
+                logger.warning("No Gemini API key provided, falling back to Ollama")
+                return await self._call_ollama_chat(prompt)
+
             system_instruction = """
             You are an AI assistant specializing in CV analysis and recruitment. 
             You provide objective, detailed, and helpful evaluations of resumes and CVs.
             Your analysis is comprehensive and includes both strengths and areas for improvement.
+            Your responses are conversational and directly helpful to job seekers.
             """
 
             payload = {
@@ -567,9 +607,9 @@ class AdvancedCVAnalysisService:
                             text_parts.append(part["text"])
                     return "".join(text_parts)
                 else:
-                    return "Không nhận được phản hồi hợp lệ từ API."
+                    return "Could not get valid response from Gemini API."
             else:
-                error_detail = f"Lỗi API ({response.status_code}): {response.text}"
+                error_detail = f"API error ({response.status_code}): {response.text}"
                 logger.error(error_detail)
                 return await self._call_ollama_chat(prompt)
 
@@ -578,22 +618,22 @@ class AdvancedCVAnalysisService:
             return await self._call_ollama_chat(prompt)
 
     async def _call_ollama_chat(self, prompt: str) -> str:
-        """Gọi Ollama API để xử lý yêu cầu khi Gemini không khả dụng"""
+        """Call Ollama Generate API as fallback when Gemini is unavailable"""
         try:
             system_prompt = """
-            Bạn là trợ lý AI chuyên về phân tích CV và tuyển dụng.
-            Bạn cung cấp đánh giá khách quan, chi tiết và hữu ích về CV của ứng viên.
-            Phân tích của bạn toàn diện và bao gồm cả điểm mạnh và các lĩnh vực cần cải thiện.
+            You are an AI assistant specializing in CV analysis and recruitment.
+            You provide objective, detailed, and helpful evaluations of CVs.
+            Your analysis is comprehensive and includes both strengths and areas for improvement.
+            Your responses are conversational and directly helpful to job seekers.
             """
 
-            url = f"{self.ollama_base_url}/api/chat"
+            url = f"{self.ollama_base_url}/api/generate"
+
+            combined_prompt = f"{system_prompt}\n\n{prompt}"
 
             payload = {
                 "model": self.ollama_model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
+                "prompt": combined_prompt,
                 "stream": False
             }
 
@@ -601,11 +641,11 @@ class AdvancedCVAnalysisService:
             response.raise_for_status()
             result = response.json()
 
-            return result.get("message", {}).get("content", "")
+            return result.get("response", "")
 
         except Exception as e:
             logger.error(f"Error calling Ollama Chat API: {e}")
-            return f"Lỗi phân tích CV: {str(e)}"
+            return f"Error analyzing CV: {str(e)}"
 
     async def process_cv_file(
             self,
@@ -614,70 +654,63 @@ class AdvancedCVAnalysisService:
             position: Optional[str] = None,
             chat_history: List[Dict[str, str]] = None
     ) -> Tuple[str, bool]:
-        """Xử lý tệp CV toàn diện từ trích xuất đến phân tích thị trường và đưa ra đánh giá
+        """Process CV file from extraction to market research and final evaluation
 
         Args:
-            file_path: Đường dẫn đến tệp CV
-            file_type: Loại tệp (.pdf, .docx, .jpg, ...)
-            position: Vị trí ứng tuyển (nếu biết)
-            chat_history: Lịch sử trò chuyện
+            file_path: Path to CV file
+            file_type: File type (.pdf, .docx, .jpg, etc.)
+            position: Applied position (if known)
+            chat_history: Chat history
 
         Returns:
-            Tuple[str, bool]: (Phân tích CV, Cần hỏi vị trí)
+            Tuple[str, bool]: (CV analysis, Need to ask for position)
         """
         try:
             logger.info(f"Processing CV file: {file_path} (type: {file_type})")
 
-            # Kiểm tra file có tồn tại không
             if not os.path.exists(file_path):
                 logger.error(f"File not found: {file_path}")
-                return "Lỗi: File không tồn tại hoặc không thể truy cập.", False
+                return "Error: File does not exist or cannot be accessed.", False
 
-            # 1. Trích xuất nội dung từ file
             cv_content = await self.extract_text_from_document(file_path, file_type)
             logger.info(f"Extracted {len(cv_content)} characters from document")
 
-            # Log một phần nội dung để debug
-            logger.debug(f"CV content excerpt: {cv_content[:500]}...")
+            if len(cv_content) < 100:
+                logger.warning("Extracted content too short to analyze effectively")
+                return "The file appears to be empty or couldn't be processed properly. Please upload a different file with more content.", False
 
-            # 2. Kiểm tra vị trí ứng tuyển
             needs_position = False
             if not position:
-                # Thử trích xuất vị trí từ CV
+
                 position = await self.extract_position_from_cv(cv_content)
                 logger.info(f"Extracted position from CV: {position}")
 
-                # Kiểm tra trong lịch sử trò chuyện
                 if not position and chat_history:
                     position_from_chat = self._extract_position_from_chat(chat_history)
                     if position_from_chat:
                         position = position_from_chat
                         logger.info(f"Extracted position from chat history: {position}")
 
-            # Nếu vẫn không có vị trí, cần hỏi người dùng
             if not position:
                 logger.info("Position not found, will ask user")
                 needs_position = True
-                # Trả về phản hồi tạm thời và cờ báo cần hỏi vị trí
-                return "Tôi đã phân tích CV của bạn, nhưng cần biết bạn đang ứng tuyển vị trí gì để đưa ra đánh giá phù hợp nhất. Vui lòng cho tôi biết vị trí bạn đang ứng tuyển.", True
+                return "I've analyzed your CV but need to know what position you're applying for to provide the most relevant assessment. Please let me know the specific role you're interested in.", True
 
-            # 3. Phân tích sơ bộ CV
-            cv_analysis = await self.analyze_cv_content(cv_content)
+            cv_analysis = await self.analyze_cv_with_ollama(cv_content)
             logger.info("Initial CV analysis complete")
 
-            # 4. Trích xuất kỹ năng
             skills = await self.extract_skills_from_analysis(cv_analysis)
             logger.info(f"Extracted {len(skills)} skills from CV")
 
-            # 5. Tìm kiếm thông tin thị trường
             market_data = await self.search_job_market(position, skills)
             logger.info(f"Market search returned {len(market_data)} results")
 
-            # 6. Tổng hợp và phân tích toàn diện
-            comprehensive_analysis = await self.generate_comprehensive_analysis(
+            comprehensive_analysis = await self.generate_final_analysis_with_gemini(
                 cv_content=cv_content,
                 position=position,
                 market_data=market_data,
+                cv_analysis=cv_analysis,
+                skills=skills,
                 chat_history=chat_history
             )
             logger.info("Comprehensive analysis complete")
@@ -686,21 +719,19 @@ class AdvancedCVAnalysisService:
 
         except Exception as e:
             logger.error(f"Error processing CV file: {e}")
-            return f"Đã xảy ra lỗi khi xử lý CV: {str(e)}", False
+            return f"An error occurred while analyzing your CV: {str(e)}", False
 
     def _extract_position_from_chat(self, chat_history: List[Dict[str, str]]) -> str:
-        """Trích xuất vị trí ứng tuyển từ lịch sử trò chuyện"""
+        """Extract position from chat history"""
         try:
             position_keywords = [
                 "vị trí", "position", "job", "ứng tuyển", "apply",
                 "nghề nghiệp", "career", "công việc", "chức danh"
             ]
 
-            # Tìm trong tin nhắn gần đây nhất trước tiên
             for msg in reversed(chat_history):
                 content = msg.get("content", "").lower()
 
-                # Tìm cấu trúc "vị trí X" hoặc "apply for X position"
                 for keyword in position_keywords:
                     pattern = rf"{keyword}[:\s]+([^\n.,?!]+)"
                     match = re.search(pattern, content, re.IGNORECASE)
@@ -709,6 +740,7 @@ class AdvancedCVAnalysisService:
                         return position
 
             return ""
+
         except Exception as e:
             logger.error(f"Error extracting position from chat: {e}")
             return ""
@@ -720,20 +752,15 @@ class AdvancedCVAnalysisService:
             position: str,
             chat_history: List[Dict[str, str]] = None
     ) -> str:
-        """Tiếp tục phân tích CV sau khi đã có vị trí ứng tuyển"""
+        """Continue CV analysis after position is provided"""
         try:
             logger.info(f"Continuing analysis with position: {position}")
 
-            # Gọi lại hàm process_cv_file với vị trí đã biết
             analysis, _ = await self.process_cv_file(file_path, file_type, position, chat_history)
             return analysis
         except Exception as e:
             logger.error(f"Error continuing analysis: {e}")
-            return f"Đã xảy ra lỗi khi phân tích CV với vị trí {position}: {str(e)}"
-
-    async def close(self):
-        """Đóng các kết nối"""
-        await self.client.aclose()
+            return f"An error occurred while analyzing your CV for the {position} position: {str(e)}"
 
     async def answer_general_question(
             self,
@@ -742,24 +769,13 @@ class AdvancedCVAnalysisService:
             cv_content: Optional[str] = None,
             knowledge_content: Optional[str] = None
     ) -> str:
-        """Trả lời câu hỏi chung, không liên quan trực tiếp đến phân tích CV
-
-        Args:
-            question: Câu hỏi của người dùng
-            chat_history: Lịch sử trò chuyện
-            cv_content: Nội dung CV (nếu có)
-            knowledge_content: Nội dung từ knowledge base (nếu có)
-
-        Returns:
-            str: Câu trả lời
-        """
+        """Answer general questions not directly related to CV analysis
+        Always use Gemini for user-facing responses"""
         try:
             logger.info(f"Answering general question: {question}")
 
-            # Phát hiện ngôn ngữ
             language = self.detect_language(question)
 
-            # Chuẩn bị lịch sử chat
             chat_history_text = ""
             if chat_history:
                 for message in chat_history:
@@ -767,41 +783,49 @@ class AdvancedCVAnalysisService:
                     content = message.get("content", "")
                     chat_history_text += f"{role.capitalize()}: {content}\n"
 
-            # Chuẩn bị context liên quan (nếu cần)
             cv_context = ""
             if cv_content and len(cv_content.strip()) > 0:
-                # Nếu có CV, chúng ta có thể tóm tắt nó
-                cv_analysis_prompt = f"""
-                Hãy tóm tắt ngắn gọn CV sau đây, tập trung vào thông tin quan trọng nhất:
 
-                {cv_content[:3000]}  # Giới hạn độ dài để xử lý nhanh
+
+                cv_summary_prompt = f"""
+                Briefly summarize this CV, focusing on the most important information:
+
+                {cv_content[:3000]}  # Limit length for faster processing
                 """
 
-                cv_summary = await self._call_ollama_chat(cv_analysis_prompt)
-                cv_context = f"Tóm tắt CV:\n{cv_summary}\n\n"
+                url = f"{self.ollama_base_url}/api/generate"
+                payload = {
+                    "model": self.ollama_model,
+                    "prompt": cv_summary_prompt,
+                    "stream": False
+                }
 
-            # Tìm kiếm thông tin từ web nếu câu hỏi liên quan đến thị trường việc làm
+                response = await self.client.post(url, json=payload)
+                response.raise_for_status()
+                result = response.json()
+
+                cv_summary = result.get("response", "")
+                cv_context = f"CV Summary:\n{cv_summary}\n\n"
+
             search_results_text = ""
-            if "thị trường" in question.lower() or "lương" in question.lower() or "tuyển dụng" in question.lower():
+            job_market_terms = ["market", "salary", "recruitment", "thị trường", "lương", "tuyển dụng"]
+            if any(term in question.lower() for term in job_market_terms):
                 try:
-                    # Thực hiện tìm kiếm
+
                     search_results = await self._perform_duckduckgo_search(question, max_results=3)
 
-                    # Định dạng kết quả
                     for i, result in enumerate(search_results, 1):
-                        search_results_text += f"Kết quả tìm kiếm {i}:\n"
-                        search_results_text += f"Tiêu đề: {result.get('title', '')}\n"
-                        search_results_text += f"Nội dung: {result.get('content', '')[:300]}...\n"
-                        search_results_text += f"Nguồn: {result.get('url', '')}\n\n"
+                        search_results_text += f"Search Result {i}:\n"
+                        search_results_text += f"Title: {result.get('title', '')}\n"
+                        search_results_text += f"Content: {result.get('content', '')[:300]}...\n"
+                        search_results_text += f"Source: {result.get('url', '')}\n\n"
                 except Exception as e:
                     logger.error(f"Error in web search: {e}")
 
-            # Chuẩn bị nội dung knowledge base
             knowledge_context = ""
             if knowledge_content and len(knowledge_content.strip()) > 0:
                 knowledge_context = f"Knowledge Base:\n{knowledge_content}\n\n"
 
-            # Tạo prompt dựa trên ngôn ngữ
             if language == "en":
                 prompt = f"""
                 Please answer the following question professionally and helpfully.
@@ -833,16 +857,24 @@ class AdvancedCVAnalysisService:
                 Trả lời:
                 """
 
-            # Sử dụng Gemini nếu có API key, nếu không sử dụng Ollama
             if self.gemini_api_key:
                 logger.info("Using Gemini API to answer general question")
                 answer = await self._call_gemini_api(prompt)
+
+                if not answer or len(answer.strip()) < 20:
+                    logger.warning("Gemini response was empty or too short, using fallback")
+                    answer = await self._call_ollama_chat(prompt)
             else:
-                logger.info("Using Ollama to answer general question")
+
+                logger.warning("No Gemini API key available - user interaction will use Ollama as fallback")
                 answer = await self._call_ollama_chat(prompt)
 
             return answer
 
         except Exception as e:
             logger.error(f"Error answering general question: {e}")
-            return f"Xin lỗi, tôi không thể trả lời câu hỏi của bạn lúc này. Lỗi: {str(e)}"
+            return f"I'm sorry, I couldn't answer your question right now. Error: {str(e)}"
+
+    async def close(self):
+        """Close connections"""
+        await self.client.aclose()
