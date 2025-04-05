@@ -33,6 +33,9 @@ RUN python -m nltk.downloader punkt
 ARG LLM_MODEL_PATH="/models"
 RUN mkdir -p ${LLM_MODEL_PATH}
 
+RUN mkdir -p /tmp/uploads /tmp/knowledge /tmp/chat_uploads \
+    && chmod -R 777 /tmp/uploads /tmp/knowledge /tmp/chat_uploads
+
 # Copy source code của ứng dụng
 COPY . .
 

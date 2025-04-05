@@ -1,7 +1,7 @@
 from typing import List, Optional, Dict, Any, Tuple
 from uuid import UUID
 
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -60,6 +60,33 @@ class ChatRepository(BaseRepository[Chat, ChatCreate, ChatUpdate]):
         await self.db.commit()
         await self.db.refresh(message)
         return message
+
+    async def update_message_metadata(
+            self,
+            message_id: UUID,
+            message_metadata: Dict[str, Any]
+    ) -> Optional[ChatMessage]:
+        """Cập nhật metadata của tin nhắn"""
+        stmt = (
+            update(ChatMessage)
+            .where(ChatMessage.id == message_id)
+            .values(message_metadata=message_metadata)
+            .returning(ChatMessage)
+        )
+        result = await self.db.execute(stmt)
+        await self.db.commit()
+        return result.scalars().first()
+
+    async def get_message_with_metadata(
+            self,
+            message_id: UUID
+    ) -> Optional[ChatMessage]:
+        """Lấy thông tin tin nhắn kèm metadata"""
+        result = await self.db.execute(
+            select(ChatMessage)
+            .where(ChatMessage.id == message_id)
+        )
+        return result.scalars().first()
 
     async def get_chat_with_messages(
             self,
